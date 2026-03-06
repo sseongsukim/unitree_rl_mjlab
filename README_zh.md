@@ -4,7 +4,7 @@
 ## ✳️ 概述
 
 Unitree RL Mjlab 是一个基于 [mjlab](https://github.com/mujocolab/mjlab.git) 构建的强化学习项目，
-使用 MuJoCo 作为物理仿真后端，当前支持 Unitree Go2、Unitree G1 和 Unitree H1_2 机器人。
+使用 MuJoCo 作为物理仿真后端，当前支持 Unitree Go2, A2, G1, H1_2 和 R1 机器人。
 
 Mjlab 结合了 [Isaac Lab](https://github.com/isaac-sim/IsaacLab) 的成熟高层 API 与 
 [MuJoCo](https://github.com/google-deepmind/mujoco_warp) 的高精度物理引擎，

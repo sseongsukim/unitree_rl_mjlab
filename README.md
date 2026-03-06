@@ -4,7 +4,7 @@
 ## ✳️ Overview
 Unitree RL Mjlab is a reinforcement learning project built upon the
 [mjlab](https://github.com/mujocolab/mjlab.git), using MuJoCo as its 
-physics simulation backend, currently supporting Unitree Go2, Unitree G1 and Unitree H1_2.
+physics simulation backend, currently supporting Unitree Go2, A2, G1, H1_2 and R1.
 
 Mjlab combines [Isaac Lab](https://github.com/isaac-sim/IsaacLab)'s proven API
 with best-in-class [MuJoCo](https://github.com/google-deepmind/mujoco_warp)
