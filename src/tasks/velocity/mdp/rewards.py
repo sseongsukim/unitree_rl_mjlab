@@ -56,7 +56,7 @@ def track_angular_velocity(
   actual = asset.data.root_link_ang_vel_b
   z_error = torch.square(command[:, 2] - actual[:, 2])
   xy_error = torch.sum(torch.square(actual[:, :2]), dim=1)
-  ang_vel_error = z_error +(0.05 * xy_error)
+  ang_vel_error = z_error + (0.05 * xy_error)
   return torch.exp(-ang_vel_error / std**2)
 
 
@@ -84,14 +84,26 @@ def body_orientation_l2(
   return xy_squared
 
 
-def self_collision_cost(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tensor:
+def self_collision_cost(
+  env: ManagerBasedRlEnv,
+  sensor_name: str,
+  force_threshold: float = 10.0,
+) -> torch.Tensor:
   """Penalize self-collisions.
 
-  Returns the number of self-collisions detected by the specified contact sensor.
+  When the sensor provides force history (from ``history_length > 0``),
+  counts substeps where any contact force exceeds *force_threshold*.
+  Falls back to the instantaneous ``found`` count otherwise.
   """
   sensor: ContactSensor = env.scene[sensor_name]
-  assert sensor.data.found is not None
-  return sensor.data.found.squeeze(-1)
+  data = sensor.data
+  if data.force_history is not None:
+    # force_history: [B, N, H, 3]
+    force_mag = torch.norm(data.force_history, dim=-1)  # [B, N, H]
+    hit = (force_mag > force_threshold).any(dim=1)  # [B, H]
+    return hit.sum(dim=-1).float()  # [B]
+  assert data.found is not None
+  return data.found.squeeze(-1)
 
 
 def body_angular_velocity_penalty(
@@ -171,6 +183,33 @@ def feet_clearance(
       active = (total_command > command_threshold).float()
       cost = cost * active
   return cost
+
+
+def feet_gait(
+        env: ManagerBasedRlEnv,
+        period: float,
+        offset: list[float],
+        threshold: float,
+        command_threshold: float,
+        command_name: str,
+        sensor_name: str,
+) -> torch.Tensor:
+    sensor: ContactSensor = env.scene[sensor_name]
+    is_contact = sensor.data.current_contact_time > 0
+    global_phase = ((env.episode_length_buf * env.step_dt) / period).unsqueeze(1)
+    offsets = torch.as_tensor(offset, device=env.device, dtype=global_phase.dtype).view(1, -1)
+    leg_phase = (global_phase + offsets) % 1.0
+    is_stance = (leg_phase < threshold)
+    reward = (is_stance == is_contact).float().mean(dim=1)
+    if command_name is not None:
+        command = env.command_manager.get_command(command_name)
+        if command is not None:
+            linear_norm = torch.norm(command[:, :2], dim=1)
+            angular_norm = torch.abs(command[:, 2])
+            total_command = linear_norm + angular_norm
+            scale = (total_command > command_threshold).float()
+            reward *= scale
+    return reward
 
 
 class feet_swing_height:
@@ -376,7 +415,7 @@ def stand_still(
 ) -> torch.Tensor:
     asset: Entity = env.scene[asset_cfg.name]
     diff_angle = asset.data.joint_pos[:, asset_cfg.joint_ids] - asset.data.default_joint_pos[:, asset_cfg.joint_ids]
-    reward = torch.sum(torch.abs(diff_angle), dim=1)
+    reward = torch.sum(torch.square(diff_angle), dim=1)
     if command_name is not None:
         command = env.command_manager.get_command(command_name)
         if command is not None:

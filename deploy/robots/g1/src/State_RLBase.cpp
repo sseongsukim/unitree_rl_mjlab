@@ -29,36 +29,6 @@ REGISTER_OBSERVATION(keyboard_velocity_commands)
     return cmd;
 }
 
-
-REGISTER_OBSERVATION(gait_phase_my)
-{
-    float period = params["period"].as<float>();
-    float delta_phase = env->step_dt * (1.0f / period);
-
-    env->global_phase += delta_phase;
-    env->global_phase = std::fmod(env->global_phase, 1.0f);
-
-    auto cmd = isaaclab::mdp::velocity_commands(env, params);
-    float cmd_norm = std::sqrt(
-        cmd[0] * cmd[0] +
-        cmd[1] * cmd[1] +
-        cmd[2] * cmd[2]
-    );
-
-    std::vector<float> obs(2);
-    obs[0] = std::sin(env->global_phase * 2 * M_PI);
-    obs[1] = std::cos(env->global_phase * 2 * M_PI);
-
-    if (cmd_norm < 0.1f)
-    {
-        obs[0] = 0.0f;
-        obs[1] = 0.0f;
-    }
-
-    return obs;
-}
-
-
 }
 
 State_RLBase::State_RLBase(int state_mode, std::string state_string)
