@@ -11,3 +11,5 @@ deploy/robots/g1_23dof/build
 deploy/robots/r1/build
 deploy/robots/a2/build
 src/assets/motions/g1/dance1_subject2.npz
+
+__pycache__/

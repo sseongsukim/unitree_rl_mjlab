@@ -5,8 +5,10 @@ from prettytable import PrettyTable
 
 import mjlab
 import mjlab.tasks  # noqa: F401
-import src.tasks
 from mjlab.tasks.registry import list_tasks
+from local_tasks import register_local_tasks
+
+register_local_tasks()
 
 
 def list_environments(keyword: str | None = None):

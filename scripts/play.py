@@ -17,6 +17,56 @@ from mjlab.utils.os import get_wandb_checkpoint_path
 from mjlab.utils.torch import configure_torch_backends
 from mjlab.utils.wrappers import VideoRecorder
 from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
+from checkpoint_compat import load_runner_checkpoint_compat
+
+
+def _validate_task_cfg(task_id: str, env_cfg) -> None:
+  """Fail fast when a task is resolved to an unexpected config."""
+  if task_id != "Unitree-Go2-Jump":
+    return
+
+  actor_terms = tuple(env_cfg.observations["actor"].terms.keys())
+  critic_terms = tuple(env_cfg.observations["critic"].terms.keys())
+  reward_terms = tuple(env_cfg.rewards.keys())
+  termination_terms = tuple(env_cfg.terminations.keys())
+
+  required_actor_terms = ("height_map",)
+  required_reward_terms = (
+    "centerline",
+    "obstacle_progress",
+    "feet_on_cube",
+    "obstacle_crossing_bonus",
+  )
+  required_termination_terms = ("off_track", "moved_backward")
+
+  missing = [
+    *[
+      f"actor.{name}"
+      for name in required_actor_terms
+      if name not in env_cfg.observations["actor"].terms
+    ],
+    *[
+      f"critic.{name}"
+      for name in required_actor_terms
+      if name not in env_cfg.observations["critic"].terms
+    ],
+    *[name for name in required_reward_terms if name not in env_cfg.rewards],
+    *[name for name in required_termination_terms if name not in env_cfg.terminations],
+  ]
+  if missing:
+    raise RuntimeError(
+      "Unitree-Go2-Jump was resolved to an unexpected config. "
+      f"Missing terms: {missing}\n"
+      f"Actor terms: {actor_terms}\n"
+      f"Critic terms: {critic_terms}\n"
+      f"Reward terms: {reward_terms}\n"
+      f"Termination terms: {termination_terms}"
+    )
+
+  print("[INFO] Jump actor terms:", actor_terms)
+  print("[INFO] Jump critic terms:", critic_terms)
+  print("[INFO] Jump reward terms:", reward_terms)
+  print("[INFO] Jump termination terms:", termination_terms)
 
 
 @dataclass(frozen=True)
@@ -45,6 +95,7 @@ def run_play(task_id: str, cfg: PlayConfig):
   device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
 
   env_cfg = load_env_cfg(task_id, play=True)
+  _validate_task_cfg(task_id, env_cfg)
   agent_cfg = load_rl_cfg(task_id)
 
   DUMMY_MODE = cfg.agent in {"zero", "random"}
@@ -154,8 +205,12 @@ def run_play(task_id: str, cfg: PlayConfig):
   else:
     runner_cls = load_runner_cls(task_id) or MjlabOnPolicyRunner
     runner = runner_cls(env, asdict(agent_cfg), device=device)
-    runner.load(
-      str(resume_path), load_cfg={"actor": True}, strict=True, map_location=device
+    load_runner_checkpoint_compat(
+      runner,
+      str(resume_path),
+      load_cfg={"actor": True},
+      strict=True,
+      map_location=device,
     )
     policy = runner.get_inference_policy(device=device)
 
@@ -181,7 +236,9 @@ def main():
   # Parse first argument to choose the task.
   # Import tasks to populate the registry.
   import mjlab.tasks  # noqa: F401
-  import src.tasks
+  from local_tasks import register_local_tasks
+
+  register_local_tasks()
 
   all_tasks = list_tasks()
   chosen_task, remaining_args = tyro.cli(

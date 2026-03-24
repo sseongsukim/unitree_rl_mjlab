@@ -10,7 +10,6 @@ Commit: f8e20c880d9c8ec7172a13d3a88a65e3a5a88448
 """
 
 from mjlab.envs import ManagerBasedRlEnvCfg
-from mjlab.envs.mdp import dr
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.action_manager import ActionTermCfg
 from mjlab.managers.command_manager import CommandTermCfg
@@ -23,11 +22,34 @@ from mjlab.scene import SceneCfg
 from mjlab.sim import MujocoCfg, SimulationCfg
 from mjlab.tasks.tracking import mdp
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
-from mjlab.terrains import TerrainEntityCfg
+from mjlab.terrains import TerrainImporterCfg
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from mjlab.viewer import ViewerConfig
 
 import src.tasks.tracking.mdp as mdp
+
+try:
+  from mjlab.envs.mdp import dr
+except ImportError:
+  class _DrFallback:
+    """Fallback no-op domain randomization hooks for older mjlab builds."""
+
+    @staticmethod
+    def geom_friction(*args, **kwargs):
+      del args, kwargs
+      return None
+
+    @staticmethod
+    def encoder_bias(*args, **kwargs):
+      del args, kwargs
+      return None
+
+    @staticmethod
+    def body_com_offset(*args, **kwargs):
+      del args, kwargs
+      return None
+
+  dr = _DrFallback()
 
 VELOCITY_RANGE = {
   "x": (-0.5, 0.5),
@@ -275,7 +297,7 @@ def make_tracking_env_cfg() -> ManagerBasedRlEnvCfg:
   ##
 
   return ManagerBasedRlEnvCfg(
-    scene=SceneCfg(terrain=TerrainEntityCfg(terrain_type="plane"), num_envs=1),
+    scene=SceneCfg(terrain=TerrainImporterCfg(terrain_type="plane"), num_envs=1),
     observations=observations,
     actions=actions,
     commands=commands,

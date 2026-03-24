@@ -1,5 +1,5 @@
-from mjlab.utils.lab_api.tasks.importer import import_packages
+"""Local task package.
 
-_BLACKLIST_PKGS = ["utils", ".mdp"]
-
-import_packages(__name__, _BLACKLIST_PKGS)
+Task registration is triggered explicitly by scripts to avoid importing every
+task module on package import.
+"""
