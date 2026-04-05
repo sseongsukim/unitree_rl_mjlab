@@ -32,10 +32,10 @@ class ViewJumpConfig:
     line_spacing: float = 1.5
     robot_x: float = 0.0
     robot_y: float = 0.0
-    cube0_dx: float = 0.8
+    cube0_dx: float = 1.5
     cube0_dy: float = 0.0
     cube0_z: float = 0.06
-    cube0_sx: float = 0.12
+    cube0_sx: float = 0.8
     cube0_sy: float = 0.30
     cube0_sz: float = 0.06
 

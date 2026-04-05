@@ -74,7 +74,7 @@ class PlayConfig:
   agent: Literal["zero", "random", "trained"] = "trained"
   checkpoint_file: str | None = None
   motion_file: str | None = None
-  num_envs: int | None = None
+  num_envs: int | None = 1
   device: str | None = None
   video: bool = False
   video_length: int = 200
