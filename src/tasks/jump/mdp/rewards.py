@@ -74,6 +74,7 @@ def feet_on_obstacle(
     sensor_name: str,
     approach_x: float,
     leave_x: float,
+    foot_indices: tuple[int, ...] | None = None,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Reward placing feet on the cube while traversing the obstacle."""
@@ -84,6 +85,8 @@ def feet_on_obstacle(
     root_x = asset.data.root_link_pos_w[:, 0]
     in_window = (root_x >= approach_x) & (root_x <= leave_x)
     foot_contacts = (sensor.data.found > 0).float()
+    if foot_indices is not None:
+        foot_contacts = foot_contacts[:, foot_indices]
     return foot_contacts.mean(dim=1) * in_window.float()
 
 
@@ -548,6 +551,502 @@ def front_foot_clearance_over_obstacle(
     return reward.mean(dim=1) * active.float()
 
 
+def pre_obstacle_front_foot_lift_reward(
+    env: ManagerBasedRlEnv,
+    start_x: float,
+    end_x: float,
+    target_height: float,
+    sensor_name: str | None = None,
+    std: float = 0.05,
+    min_forward_alignment: float = 0.5,
+    alignment_power: float = 2.0,
+    require_no_contact: bool = True,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FRONT_FEET_CFG,
+) -> torch.Tensor:
+    """Reward lifting the front feet before the obstacle while still approaching cleanly."""
+    asset: Entity = env.scene[asset_cfg.name]
+    root_x = asset.data.root_link_pos_w[:, 0]
+    active = (root_x >= start_x) & (root_x <= end_x)
+
+    if require_no_contact and sensor_name is not None:
+        sensor: ContactSensor = env.scene[sensor_name]
+        assert sensor.data.found is not None
+        no_contact_yet = ~(sensor.data.found > 0).any(dim=1)
+        active = active & no_contact_yet
+
+    foot_height = asset.data.site_pos_w[:, asset_cfg.site_ids, 2]
+    height_error = foot_height - target_height
+    lift_reward = torch.exp(-torch.square(height_error) / max(std**2, 1.0e-6)).mean(
+        dim=1
+    )
+    forward_alignment = torch.clamp(torch.cos(asset.data.heading_w), min=0.0, max=1.0)
+    heading_gate = (forward_alignment >= min_forward_alignment).float()
+    heading_scale = torch.pow(forward_alignment, alignment_power)
+    return lift_reward * active.float() * heading_gate * heading_scale
+
+
+def front_swing_clearance_reward(
+    env: ManagerBasedRlEnv,
+    start_x: float,
+    end_x: float,
+    target_height: float,
+    ground_sensor_name: str,
+    cube_sensor_name: str | None = None,
+    std: float = 0.04,
+    min_forward_alignment: float = 0.6,
+    alignment_power: float = 2.0,
+    foot_indices: tuple[int, ...] | None = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FRONT_FEET_CFG,
+) -> torch.Tensor:
+    """Reward front-foot swing clearance in the obstacle approach window."""
+    asset: Entity = env.scene[asset_cfg.name]
+    ground_sensor: ContactSensor = env.scene[ground_sensor_name]
+    assert ground_sensor.data.found is not None
+
+    root_x = asset.data.root_link_pos_w[:, 0]
+    active = (root_x >= start_x) & (root_x <= end_x)
+
+    swing_mask = ground_sensor.data.found == 0
+    if foot_indices is not None:
+        swing_mask = swing_mask[:, foot_indices]
+
+    if cube_sensor_name is not None:
+        cube_sensor: ContactSensor = env.scene[cube_sensor_name]
+        assert cube_sensor.data.found is not None
+        cube_contact = cube_sensor.data.found > 0
+        if foot_indices is not None:
+            cube_contact = cube_contact[:, foot_indices]
+        swing_mask = swing_mask & (~cube_contact)
+
+    foot_height = asset.data.site_pos_w[:, asset_cfg.site_ids, 2]
+    height_error = foot_height - target_height
+    height_reward = torch.exp(-torch.square(height_error) / max(std**2, 1.0e-6))
+    swing_reward = (height_reward * swing_mask.float()).sum(dim=1)
+    swing_count = swing_mask.float().sum(dim=1)
+    swing_reward = swing_reward / torch.clamp(swing_count, min=1.0)
+    swing_reward = swing_reward * (swing_count > 0).float()
+
+    forward_alignment = torch.clamp(torch.cos(asset.data.heading_w), min=0.0, max=1.0)
+    heading_gate = (forward_alignment >= min_forward_alignment).float()
+    heading_scale = torch.pow(forward_alignment, alignment_power)
+    return swing_reward * active.float() * heading_gate * heading_scale
+
+
+def swing_contact_penalty_before_obstacle(
+    env: ManagerBasedRlEnv,
+    start_x: float,
+    end_x: float,
+    ground_sensor_name: str,
+    cube_sensor_name: str | None = None,
+    foot_indices: tuple[int, ...] | None = None,
+    min_forward_alignment: float = 0.5,
+    alignment_power: float = 1.0,
+    desired_contact_height: float | None = None,
+    contact_margin: float = 0.015,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FRONT_FEET_CFG,
+) -> torch.Tensor:
+    """Penalize front-foot contact in the obstacle approach window when lift is desired."""
+    asset: Entity = env.scene[asset_cfg.name]
+    ground_sensor: ContactSensor = env.scene[ground_sensor_name]
+    assert ground_sensor.data.found is not None
+
+    root_x = asset.data.root_link_pos_w[:, 0]
+    active = (root_x >= start_x) & (root_x <= end_x)
+
+    ground_contact = ground_sensor.data.found > 0
+    if foot_indices is not None:
+        ground_contact = ground_contact[:, foot_indices]
+
+    contact_mask = ground_contact
+    if cube_sensor_name is not None:
+        cube_sensor: ContactSensor = env.scene[cube_sensor_name]
+        assert cube_sensor.data.found is not None
+        cube_contact = cube_sensor.data.found > 0
+        if foot_indices is not None:
+            cube_contact = cube_contact[:, foot_indices]
+        contact_mask = contact_mask | cube_contact
+
+    if desired_contact_height is not None:
+        foot_height = asset.data.site_pos_w[:, asset_cfg.site_ids, 2]
+        should_be_lifted = foot_height < (desired_contact_height - contact_margin)
+        contact_mask = contact_mask & should_be_lifted
+
+    penalty = contact_mask.float().mean(dim=1)
+    forward_alignment = torch.clamp(torch.cos(asset.data.heading_w), min=0.0, max=1.0)
+    heading_gate = (forward_alignment >= min_forward_alignment).float()
+    heading_scale = torch.pow(forward_alignment, alignment_power)
+    return penalty * active.float() * heading_gate * heading_scale
+
+
+def pre_obstacle_body_height_reward(
+    env: ManagerBasedRlEnv,
+    start_x: float,
+    end_x: float,
+    target_height: float,
+    std: float = 0.05,
+    min_forward_alignment: float = 0.6,
+    alignment_power: float = 2.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward raising the body in a specific obstacle-relative window."""
+    asset: Entity = env.scene[asset_cfg.name]
+    root_x = asset.data.root_link_pos_w[:, 0]
+    root_z = asset.data.root_link_pos_w[:, 2]
+    active = (root_x >= start_x) & (root_x <= end_x)
+
+    height_error = root_z - target_height
+    height_reward = torch.exp(-torch.square(height_error) / max(std**2, 1.0e-6))
+    forward_alignment = torch.clamp(torch.cos(asset.data.heading_w), min=0.0, max=1.0)
+    heading_gate = (forward_alignment >= min_forward_alignment).float()
+    heading_scale = torch.pow(forward_alignment, alignment_power)
+    return height_reward * active.float() * heading_gate * heading_scale
+
+
+def pre_obstacle_twist_penalty(
+    env: ManagerBasedRlEnv,
+    start_x: float,
+    end_x: float,
+    heading_weight: float = 1.0,
+    yaw_rate_weight: float = 0.5,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Penalize yaw twisting in an obstacle-relative approach window."""
+    asset: Entity = env.scene[asset_cfg.name]
+    root_x = asset.data.root_link_pos_w[:, 0]
+    active = (root_x >= start_x) & (root_x <= end_x)
+
+    heading_error = 1.0 - torch.clamp(torch.cos(asset.data.heading_w), min=0.0, max=1.0)
+    yaw_rate = torch.square(asset.data.root_link_ang_vel_b[:, 2])
+    penalty = (heading_weight * heading_error) + (yaw_rate_weight * yaw_rate)
+    return penalty * active.float()
+
+
+def rear_stance_push_reward(
+    env: ManagerBasedRlEnv,
+    start_x: float,
+    end_x: float,
+    ground_sensor_name: str,
+    front_foot_indices: tuple[int, ...],
+    rear_foot_indices: tuple[int, ...],
+    front_target_height: float,
+    front_min_height: float = 0.05,
+    target_speed: float = 1.2,
+    target_rear_force: float = 120.0,
+    min_forward_alignment: float = 0.6,
+    alignment_power: float = 2.0,
+    front_asset_cfg: SceneEntityCfg = _DEFAULT_FRONT_FEET_CFG,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward a takeoff pattern with front-feet lift and rear-feet push."""
+    robot: Entity = env.scene[asset_cfg.name]
+    ground_sensor: ContactSensor = env.scene[ground_sensor_name]
+    sensor_data = ground_sensor.data
+    assert sensor_data.found is not None
+    assert sensor_data.force is not None
+
+    root_x = robot.data.root_link_pos_w[:, 0]
+    active = (root_x >= start_x) & (root_x <= end_x)
+
+    front_heights = robot.data.site_pos_w[:, front_asset_cfg.site_ids, 2]
+    front_lift = torch.clamp(
+        (front_heights - front_min_height)
+        / max(front_target_height - front_min_height, 1.0e-6),
+        min=0.0,
+        max=1.0,
+    ).mean(dim=1)
+
+    rear_contact = (sensor_data.found[:, rear_foot_indices] > 0).float()
+    rear_stance = rear_contact.mean(dim=1)
+    rear_vertical_force = torch.clamp(sensor_data.force[:, rear_foot_indices, 2], min=0.0)
+    rear_push = torch.clamp(
+        rear_vertical_force / max(target_rear_force, 1.0e-6),
+        min=0.0,
+        max=1.0,
+    ).mean(dim=1)
+
+    front_contact = (sensor_data.found[:, front_foot_indices] > 0).float()
+    front_clear = 1.0 - front_contact.mean(dim=1)
+    forward_speed = torch.clamp(
+        robot.data.root_link_lin_vel_w[:, 0], min=0.0, max=target_speed
+    ) / max(target_speed, 1.0e-6)
+    forward_alignment = torch.clamp(torch.cos(robot.data.heading_w), min=0.0, max=1.0)
+    heading_gate = (forward_alignment >= min_forward_alignment).float()
+    heading_scale = torch.pow(forward_alignment, alignment_power)
+
+    return (
+        front_lift
+        * front_clear
+        * rear_stance
+        * rear_push
+        * forward_speed
+        * active.float()
+        * heading_gate
+        * heading_scale
+    )
+
+
+def rear_air_penalty_before_takeoff(
+    env: ManagerBasedRlEnv,
+    start_x: float,
+    end_x: float,
+    ground_sensor_name: str,
+    front_foot_indices: tuple[int, ...],
+    rear_foot_indices: tuple[int, ...],
+    front_target_height: float,
+    front_min_height: float = 0.05,
+    min_forward_alignment: float = 0.6,
+    alignment_power: float = 2.0,
+    front_asset_cfg: SceneEntityCfg = _DEFAULT_FRONT_FEET_CFG,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Penalize rear feet lifting too early before the push-off completes."""
+    robot: Entity = env.scene[asset_cfg.name]
+    ground_sensor: ContactSensor = env.scene[ground_sensor_name]
+    assert ground_sensor.data.found is not None
+
+    root_x = robot.data.root_link_pos_w[:, 0]
+    active = (root_x >= start_x) & (root_x <= end_x)
+
+    front_heights = robot.data.site_pos_w[:, front_asset_cfg.site_ids, 2]
+    front_lift = torch.clamp(
+        (front_heights - front_min_height)
+        / max(front_target_height - front_min_height, 1.0e-6),
+        min=0.0,
+        max=1.0,
+    ).mean(dim=1)
+
+    front_contact = (ground_sensor.data.found[:, front_foot_indices] > 0).float()
+    front_clear = 1.0 - front_contact.mean(dim=1)
+    rear_in_air = (ground_sensor.data.found[:, rear_foot_indices] == 0).float().mean(dim=1)
+
+    forward_alignment = torch.clamp(torch.cos(robot.data.heading_w), min=0.0, max=1.0)
+    heading_gate = (forward_alignment >= min_forward_alignment).float()
+    heading_scale = torch.pow(forward_alignment, alignment_power)
+
+    return (
+        rear_in_air
+        * front_lift
+        * front_clear
+        * active.float()
+        * heading_gate
+        * heading_scale
+    )
+
+
+def rear_swing_clearance_reward(
+    env: ManagerBasedRlEnv,
+    start_x: float,
+    end_x: float,
+    target_height: float,
+    ground_sensor_name: str,
+    cube_sensor_name: str | None = None,
+    std: float = 0.05,
+    min_forward_alignment: float = 0.6,
+    alignment_power: float = 2.0,
+    foot_indices: tuple[int, ...] | None = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward rear-foot swing clearance while crossing the obstacle."""
+    asset: Entity = env.scene[asset_cfg.name]
+    ground_sensor: ContactSensor = env.scene[ground_sensor_name]
+    assert ground_sensor.data.found is not None
+
+    root_x = asset.data.root_link_pos_w[:, 0]
+    active = (root_x >= start_x) & (root_x <= end_x)
+
+    swing_mask = ground_sensor.data.found == 0
+    if foot_indices is not None:
+        swing_mask = swing_mask[:, foot_indices]
+
+    if cube_sensor_name is not None:
+        cube_sensor: ContactSensor = env.scene[cube_sensor_name]
+        assert cube_sensor.data.found is not None
+        cube_contact = cube_sensor.data.found > 0
+        if foot_indices is not None:
+            cube_contact = cube_contact[:, foot_indices]
+        swing_mask = swing_mask & (~cube_contact)
+
+    foot_height = asset.data.site_pos_w[:, asset_cfg.site_ids, 2]
+    height_error = foot_height - target_height
+    height_reward = torch.exp(-torch.square(height_error) / max(std**2, 1.0e-6))
+    swing_reward = (height_reward * swing_mask.float()).sum(dim=1)
+    swing_count = swing_mask.float().sum(dim=1)
+    swing_reward = swing_reward / torch.clamp(swing_count, min=1.0)
+    swing_reward = swing_reward * (swing_count > 0).float()
+
+    forward_alignment = torch.clamp(torch.cos(asset.data.heading_w), min=0.0, max=1.0)
+    heading_gate = (forward_alignment >= min_forward_alignment).float()
+    heading_scale = torch.pow(forward_alignment, alignment_power)
+    return swing_reward * active.float() * heading_gate * heading_scale
+
+
+def obstacle_top_stall_penalty(
+    env: ManagerBasedRlEnv,
+    start_x: float,
+    end_x: float,
+    cube_sensor_name: str,
+    speed_threshold: float = 0.2,
+    min_contacts: int = 2,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Penalize getting stuck on top of the obstacle after mounting it."""
+    asset: Entity = env.scene[asset_cfg.name]
+    cube_sensor: ContactSensor = env.scene[cube_sensor_name]
+    assert cube_sensor.data.found is not None
+
+    root_x = asset.data.root_link_pos_w[:, 0]
+    active = (root_x >= start_x) & (root_x <= end_x)
+    num_contacts = (cube_sensor.data.found > 0).sum(dim=1)
+    low_speed = asset.data.root_link_lin_vel_w[:, 0] < speed_threshold
+    stuck = (num_contacts >= min_contacts) & low_speed
+    return stuck.float() * active.float()
+
+
+def crossing_body_height_reward(
+    env: ManagerBasedRlEnv,
+    start_x: float,
+    end_x: float,
+    target_height: float,
+    std: float = 0.05,
+    min_forward_alignment: float = 0.6,
+    alignment_power: float = 2.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward extra body height while the robot is traversing the obstacle."""
+    asset: Entity = env.scene[asset_cfg.name]
+    root_x = asset.data.root_link_pos_w[:, 0]
+    root_z = asset.data.root_link_pos_w[:, 2]
+    active = (root_x >= start_x) & (root_x <= end_x)
+
+    height_error = root_z - target_height
+    height_reward = torch.exp(-torch.square(height_error) / max(std**2, 1.0e-6))
+    forward_alignment = torch.clamp(torch.cos(asset.data.heading_w), min=0.0, max=1.0)
+    heading_gate = (forward_alignment >= min_forward_alignment).float()
+    heading_scale = torch.pow(forward_alignment, alignment_power)
+    return height_reward * active.float() * heading_gate * heading_scale
+
+
+def post_mount_forward_reward(
+    env: ManagerBasedRlEnv,
+    start_x: float,
+    end_x: float,
+    cube_sensor_name: str,
+    target_speed: float = 0.8,
+    min_contacts: int = 2,
+    min_forward_alignment: float = 0.6,
+    alignment_power: float = 2.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward forward drive after mounting the obstacle instead of stalling on top."""
+    asset: Entity = env.scene[asset_cfg.name]
+    cube_sensor: ContactSensor = env.scene[cube_sensor_name]
+    assert cube_sensor.data.found is not None
+
+    root_x = asset.data.root_link_pos_w[:, 0]
+    active = (root_x >= start_x) & (root_x <= end_x)
+    num_contacts = (cube_sensor.data.found > 0).sum(dim=1)
+    mounted = num_contacts >= min_contacts
+    forward_speed = torch.clamp(
+        asset.data.root_link_lin_vel_w[:, 0],
+        min=0.0,
+        max=target_speed,
+    ) / max(target_speed, 1.0e-6)
+    forward_alignment = torch.clamp(torch.cos(asset.data.heading_w), min=0.0, max=1.0)
+    heading_gate = (forward_alignment >= min_forward_alignment).float()
+    heading_scale = torch.pow(forward_alignment, alignment_power)
+    return forward_speed * active.float() * mounted.float() * heading_gate * heading_scale
+
+
+def obstacle_jump_x_velocity_reward(
+    env: ManagerBasedRlEnv,
+    start_x: float,
+    end_x: float,
+    target_speed: float = 1.2,
+    pitch_threshold: float | None = None,
+    min_forward_alignment: float = 0.6,
+    alignment_power: float = 2.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward forward x-velocity in the obstacle traversal window."""
+    asset: Entity = env.scene[asset_cfg.name]
+    root_x = asset.data.root_link_pos_w[:, 0]
+    active = (root_x >= start_x) & (root_x <= end_x)
+
+    forward_speed = torch.clamp(
+        asset.data.root_link_lin_vel_w[:, 0],
+        min=0.0,
+        max=target_speed,
+    ) / max(target_speed, 1.0e-6)
+    forward_alignment = torch.clamp(torch.cos(asset.data.heading_w), min=0.0, max=1.0)
+    heading_gate = (forward_alignment >= min_forward_alignment).float()
+    heading_scale = torch.pow(forward_alignment, alignment_power)
+
+    if pitch_threshold is not None:
+        pitch_like = -asset.data.projected_gravity_b[:, 0]
+        pitch_gate = (pitch_like >= pitch_threshold).float()
+    else:
+        pitch_gate = 1.0
+
+    return forward_speed * active.float() * heading_gate * heading_scale * pitch_gate
+
+
+def obstacle_front_hip_pos_penalty(
+    env: ManagerBasedRlEnv,
+    start_x: float,
+    end_x: float,
+    asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """Penalize excessive front-hip deviation in an obstacle-relative window."""
+    asset: Entity = env.scene[asset_cfg.name]
+    root_x = asset.data.root_link_pos_w[:, 0]
+    active = (root_x >= start_x) & (root_x <= end_x)
+
+    diff = asset.data.joint_pos[:, asset_cfg.joint_ids] - asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+    penalty = torch.mean(torch.square(diff), dim=1)
+    return penalty * active.float()
+
+
+class obstacle_leg_symmetry_penalty:
+    """Penalize left-right asymmetry of leg joint motion in an obstacle window."""
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        asset: Entity = env.scene[cfg.params["asset_cfg"].name]
+        self.pair_ids: list[tuple[int, int]] = []
+        for right_name, left_name in cfg.params["joint_pairs"]:
+            right_ids, _ = asset.find_joints(right_name)
+            left_ids, _ = asset.find_joints(left_name)
+            assert len(right_ids) == 1, f"Expected one joint for pattern {right_name}"
+            assert len(left_ids) == 1, f"Expected one joint for pattern {left_name}"
+            self.pair_ids.append((right_ids[0], left_ids[0]))
+        self.flip_right_sign = tuple(cfg.params.get("flip_right_sign", (False,) * len(self.pair_ids)))
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        start_x: float,
+        end_x: float,
+        joint_pairs,
+        flip_right_sign,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        del joint_pairs, flip_right_sign
+        asset: Entity = env.scene[asset_cfg.name]
+        root_x = asset.data.root_link_pos_w[:, 0]
+        active = (root_x >= start_x) & (root_x <= end_x)
+
+        penalty = torch.zeros(env.num_envs, device=env.device)
+        joint_delta = asset.data.joint_pos - asset.data.default_joint_pos
+        for idx, (right_id, left_id) in enumerate(self.pair_ids):
+            right_val = joint_delta[:, right_id]
+            left_val = joint_delta[:, left_id]
+            if self.flip_right_sign[idx]:
+                right_val = -right_val
+            penalty = penalty + torch.abs(right_val - left_val)
+
+        penalty = penalty / max(len(self.pair_ids), 1)
+        return penalty * active.float()
+
+
 def distance_to_clear_goal(
     env: ManagerBasedRlEnv,
     goal_x: float,
@@ -648,22 +1147,53 @@ class obstacle_progress:
     def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
         del cfg
         self.prev_progress = torch.zeros(env.num_envs, device=env.device)
+        self.obstacle_touched = torch.zeros(
+            env.num_envs,
+            device=env.device,
+            dtype=torch.bool,
+        )
 
     def __call__(
         self,
         env: ManagerBasedRlEnv,
         start_x: float,
         goal_x: float,
+        contact_sensor_name: str | None = None,
+        contact_required_x: float | None = None,
+        min_forward_alignment: float = 0.0,
+        alignment_power: float = 1.0,
         asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     ) -> torch.Tensor:
         asset: Entity = env.scene[asset_cfg.name]
         just_reset = env.episode_length_buf <= 1
         self.prev_progress[just_reset] = 0.0
+        self.obstacle_touched[just_reset] = False
+
+        if contact_sensor_name is not None:
+            sensor: ContactSensor = env.scene[contact_sensor_name]
+            assert sensor.data.found is not None
+            touched_now = (sensor.data.found > 0).any(dim=1)
+            self.obstacle_touched |= touched_now
 
         root_x = asset.data.root_link_pos_w[:, 0]
+        effective_root_x = root_x
+        if contact_required_x is not None:
+            effective_root_x = torch.where(
+                self.obstacle_touched,
+                effective_root_x,
+                torch.clamp(effective_root_x, max=contact_required_x),
+            )
         total_distance = max(goal_x - start_x, 1.0e-6)
-        progress = torch.clamp((root_x - start_x) / total_distance, min=0.0, max=1.0)
+        progress = torch.clamp(
+            (effective_root_x - start_x) / total_distance,
+            min=0.0,
+            max=1.0,
+        )
+        forward_alignment = torch.clamp(torch.cos(asset.data.heading_w), min=0.0, max=1.0)
+        heading_gate = (forward_alignment >= min_forward_alignment).float()
+        heading_scale = torch.pow(forward_alignment, alignment_power)
         reward = torch.clamp(progress - self.prev_progress, min=0.0)
+        reward = reward * heading_gate * heading_scale
         self.prev_progress[:] = progress
 
         env.extras["log"]["Metrics/obstacle_progress_mean"] = progress.mean()
@@ -680,20 +1210,42 @@ class obstacle_crossing_bonus:
             device=env.device,
             dtype=torch.bool,
         )
+        self.obstacle_touched = torch.zeros(
+            env.num_envs,
+            device=env.device,
+            dtype=torch.bool,
+        )
 
     def __call__(
         self,
         env: ManagerBasedRlEnv,
         goal_x: float,
+        contact_sensor_name: str | None = None,
+        min_forward_alignment: float = 0.0,
+        alignment_power: float = 1.0,
         asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     ) -> torch.Tensor:
         asset: Entity = env.scene[asset_cfg.name]
         just_reset = env.episode_length_buf <= 1
         self.already_crossed[just_reset] = False
+        self.obstacle_touched[just_reset] = False
+
+        if contact_sensor_name is not None:
+            sensor: ContactSensor = env.scene[contact_sensor_name]
+            assert sensor.data.found is not None
+            touched_now = (sensor.data.found > 0).any(dim=1)
+            self.obstacle_touched |= touched_now
 
         root_x = asset.data.root_link_pos_w[:, 0]
         crossed = root_x >= goal_x
-        reward = (~self.already_crossed & crossed).float()
+        forward_alignment = torch.clamp(torch.cos(asset.data.heading_w), min=0.0, max=1.0)
+        heading_gate = forward_alignment >= min_forward_alignment
+        heading_scale = torch.pow(forward_alignment, alignment_power)
+        contact_gate = self.obstacle_touched if contact_sensor_name is not None else True
+        reward = (
+            (~self.already_crossed & crossed & heading_gate & contact_gate).float()
+            * heading_scale
+        )
         self.already_crossed |= crossed
 
         env.extras["log"]["Metrics/obstacle_crossed_ratio"] = crossed.float().mean()

@@ -10,7 +10,6 @@ from typing import Literal, cast
 
 import tyro
 
-from checkpoint_compat import load_runner_checkpoint_compat
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
 from mjlab.rl import MjlabOnPolicyRunner, RslRlBaseRunnerCfg, RslRlVecEnvWrapper
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
@@ -20,58 +19,8 @@ from mjlab.utils.os import dump_yaml, get_checkpoint_path
 from mjlab.utils.torch import configure_torch_backends
 from mjlab.utils.wrappers import VideoRecorder
 
-
-def _validate_task_cfg(task_id: str, env_cfg: ManagerBasedRlEnvCfg) -> None:
-    """Fail fast when a task is resolved to an unexpected config."""
-    if task_id != "Unitree-Go2-Jump":
-        return
-
-    actor_terms = tuple(env_cfg.observations["actor"].terms.keys())
-    critic_terms = tuple(env_cfg.observations["critic"].terms.keys())
-    reward_terms = tuple(env_cfg.rewards.keys())
-    termination_terms = tuple(env_cfg.terminations.keys())
-
-    required_actor_terms = ("height_map",)
-    required_reward_terms = (
-        "centerline",
-        "obstacle_progress",
-        "feet_on_cube",
-        "obstacle_crossing_bonus",
-    )
-    required_termination_terms = ("off_track", "moved_backward")
-
-    missing = [
-        *[
-            f"actor.{name}"
-            for name in required_actor_terms
-            if name not in env_cfg.observations["actor"].terms
-        ],
-        *[
-            f"critic.{name}"
-            for name in required_actor_terms
-            if name not in env_cfg.observations["critic"].terms
-        ],
-        *[name for name in required_reward_terms if name not in env_cfg.rewards],
-        *[
-            name
-            for name in required_termination_terms
-            if name not in env_cfg.terminations
-        ],
-    ]
-    if missing:
-        raise RuntimeError(
-            "Unitree-Go2-Jump was resolved to an unexpected config. "
-            f"Missing terms: {missing}\n"
-            f"Actor terms: {actor_terms}\n"
-            f"Critic terms: {critic_terms}\n"
-            f"Reward terms: {reward_terms}\n"
-            f"Termination terms: {termination_terms}"
-        )
-
-    print("[INFO] Jump actor terms:", actor_terms)
-    print("[INFO] Jump critic terms:", critic_terms)
-    print("[INFO] Jump reward terms:", reward_terms)
-    print("[INFO] Jump termination terms:", termination_terms)
+import src.tasks.velocity.config.go2
+import src.tasks.leap.config.go2
 
 
 @dataclass(frozen=True)
@@ -89,7 +38,6 @@ class TrainConfig:
     @staticmethod
     def from_task(task_id: str) -> "TrainConfig":
         env_cfg = load_env_cfg(task_id)
-        _validate_task_cfg(task_id, env_cfg)
         agent_cfg = load_rl_cfg(task_id)
         return TrainConfig(env=env_cfg, agent=agent_cfg)
 
@@ -185,7 +133,7 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
     runner.add_git_repo_to_log(__file__)
     if resume_path is not None:
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
-        load_runner_checkpoint_compat(runner, str(resume_path))
+        runner.load(str(resume_path))
 
     # Only write config files from rank 0 to avoid race conditions.
     if rank == 0:
@@ -203,7 +151,8 @@ def launch_training(task_id: str, args: TrainConfig | None = None):
     args = args or TrainConfig.from_task(task_id)
 
     # Create log directory once before launching workers.
-    log_root_path = Path("logs") / "rsl_rl" / args.agent.experiment_name
+    task_name = task_id.split("-")[-1].lower()
+    log_root_path = Path("logs") / "rsl_rl" / args.agent.experiment_name / task_name
     log_root_path.resolve()
     log_dir_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     if args.agent.run_name:
@@ -253,9 +202,7 @@ def main():
     # Parse first argument to choose the task.
     # Import tasks to populate the registry.
     import mjlab.tasks  # noqa: F401
-    from local_tasks import register_local_tasks
-
-    register_local_tasks()
+    import src.tasks
 
     all_tasks = list_tasks()
     chosen_task, remaining_args = tyro.cli(
@@ -263,7 +210,6 @@ def main():
         add_help=False,
         return_unknown_args=True,
         config=mjlab.TYRO_FLAGS,
-        default="Unitree-Go2-Jump",
     )
 
     args = tyro.cli(

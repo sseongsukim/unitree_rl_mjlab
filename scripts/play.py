@@ -13,64 +13,18 @@ from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
-from mjlab.utils.os import get_wandb_checkpoint_path
+from mjlab.utils.os import get_checkpoint_path, get_wandb_checkpoint_path
 from mjlab.utils.torch import configure_torch_backends
 from mjlab.utils.wrappers import VideoRecorder
 from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
-from checkpoint_compat import load_runner_checkpoint_compat
 
-
-def _validate_task_cfg(task_id: str, env_cfg) -> None:
-  """Fail fast when a task is resolved to an unexpected config."""
-  if task_id != "Unitree-Go2-Jump":
-    return
-
-  actor_terms = tuple(env_cfg.observations["actor"].terms.keys())
-  critic_terms = tuple(env_cfg.observations["critic"].terms.keys())
-  reward_terms = tuple(env_cfg.rewards.keys())
-  termination_terms = tuple(env_cfg.terminations.keys())
-
-  required_actor_terms = ("height_map",)
-  required_reward_terms = (
-    "centerline",
-    "obstacle_progress",
-    "feet_on_cube",
-    "obstacle_crossing_bonus",
-  )
-  required_termination_terms = ("off_track", "moved_backward")
-
-  missing = [
-    *[
-      f"actor.{name}"
-      for name in required_actor_terms
-      if name not in env_cfg.observations["actor"].terms
-    ],
-    *[
-      f"critic.{name}"
-      for name in required_actor_terms
-      if name not in env_cfg.observations["critic"].terms
-    ],
-    *[name for name in required_reward_terms if name not in env_cfg.rewards],
-    *[name for name in required_termination_terms if name not in env_cfg.terminations],
-  ]
-  if missing:
-    raise RuntimeError(
-      "Unitree-Go2-Jump was resolved to an unexpected config. "
-      f"Missing terms: {missing}\n"
-      f"Actor terms: {actor_terms}\n"
-      f"Critic terms: {critic_terms}\n"
-      f"Reward terms: {reward_terms}\n"
-      f"Termination terms: {termination_terms}"
-    )
-
-  print("[INFO] Jump actor terms:", actor_terms)
-  print("[INFO] Jump critic terms:", critic_terms)
-  print("[INFO] Jump reward terms:", reward_terms)
-  print("[INFO] Jump termination terms:", termination_terms)
+import src.tasks.velocity.config.go2
+import src.tasks.leap.config.go2
 
 
 @dataclass(frozen=True)
 class PlayConfig:
+<<<<<<< HEAD
   agent: Literal["zero", "random", "trained"] = "trained"
   checkpoint_file: str | None = None
   motion_file: str | None = None
@@ -84,184 +38,204 @@ class PlayConfig:
   viewer: Literal["auto", "native", "viser"] = "auto"
   no_terminations: bool = False
   """Disable all termination conditions (useful for viewing motions with dummy agents)."""
+=======
+    agent: Literal["zero", "random", "trained"] = "trained"
+    checkpoint_file: str | None = None
+    motion_file: str | None = None
+    num_envs: int | None = None
+    device: str | None = None
+    video: bool = False
+    video_length: int = 200
+    video_height: int | None = None
+    video_width: int | None = None
+    camera: int | str | None = None
+    viewer: Literal["auto", "native", "viser"] = "auto"
+    no_terminations: bool = False
+    wandb_run_path: str | None = None
+    """Disable all termination conditions (useful for viewing motions with dummy agents)."""
+>>>>>>> 5727062 (combine JS with SS)
 
-  # Internal flag used by demo script.
-  _demo_mode: tyro.conf.Suppress[bool] = False
+    # Internal flag used by demo script.
+    _demo_mode: tyro.conf.Suppress[bool] = False
 
 
 def run_play(task_id: str, cfg: PlayConfig):
-  configure_torch_backends()
+    configure_torch_backends()
 
-  device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
+    device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
 
-  env_cfg = load_env_cfg(task_id, play=True)
-  _validate_task_cfg(task_id, env_cfg)
-  agent_cfg = load_rl_cfg(task_id)
+    env_cfg = load_env_cfg(task_id, play=True)
+    agent_cfg = load_rl_cfg(task_id)
 
-  DUMMY_MODE = cfg.agent in {"zero", "random"}
-  TRAINED_MODE = not DUMMY_MODE
+    DUMMY_MODE = cfg.agent in {"zero", "random"}
+    TRAINED_MODE = not DUMMY_MODE
 
-  # Disable terminations if requested (useful for viewing motions).
-  if cfg.no_terminations:
-    env_cfg.terminations = {}
-    print("[INFO]: Terminations disabled")
+    # Disable terminations if requested (useful for viewing motions).
+    if cfg.no_terminations:
+        env_cfg.terminations = {}
+        print("[INFO]: Terminations disabled")
 
-  # Check if this is a tracking task by checking for motion command.
-  is_tracking_task = "motion" in env_cfg.commands and isinstance(
-    env_cfg.commands["motion"], MotionCommandCfg
-  )
+    # Check if this is a tracking task by checking for motion command.
+    is_tracking_task = "motion" in env_cfg.commands and isinstance(
+        env_cfg.commands["motion"], MotionCommandCfg
+    )
 
-  if is_tracking_task and cfg._demo_mode:
-    # Demo mode: use uniform sampling to see more diversity with num_envs > 1.
-    motion_cmd = env_cfg.commands["motion"]
-    assert isinstance(motion_cmd, MotionCommandCfg)
-    motion_cmd.sampling_mode = "uniform"
+    if is_tracking_task and cfg._demo_mode:
+        # Demo mode: use uniform sampling to see more diversity with num_envs > 1.
+        motion_cmd = env_cfg.commands["motion"]
+        assert isinstance(motion_cmd, MotionCommandCfg)
+        motion_cmd.sampling_mode = "uniform"
 
-  if is_tracking_task:
-    motion_cmd = env_cfg.commands["motion"]
-    assert isinstance(motion_cmd, MotionCommandCfg)
+    if is_tracking_task:
+        motion_cmd = env_cfg.commands["motion"]
+        assert isinstance(motion_cmd, MotionCommandCfg)
 
-    # Check for local motion file first (works for both dummy and trained modes).
-    if cfg.motion_file is not None and Path(cfg.motion_file).exists():
-      print(f"[INFO]: Using local motion file: {cfg.motion_file}")
-      motion_cmd.motion_file = cfg.motion_file
-    elif DUMMY_MODE:
-      if not cfg.registry_name:
-        raise ValueError(
-          "Tracking tasks require either:\n"
-          "  --motion-file /path/to/motion.npz (local file)\n"
-          "  --registry-name your-org/motions/motion-name (download from WandB)"
+        # Check for local motion file first (works for both dummy and trained modes).
+        if cfg.motion_file is not None and Path(cfg.motion_file).exists():
+            print(f"[INFO]: Using local motion file: {cfg.motion_file}")
+            motion_cmd.motion_file = cfg.motion_file
+        elif DUMMY_MODE:
+            raise ValueError(
+                "Tracking tasks require --motion-file /path/to/motion.npz (local file), "
+                "or set motion in env cfg to a valid path."
+            )
+    log_dir: Path | None = None
+    resume_path: Path | None = None
+    if TRAINED_MODE:
+        task_name = task_id.split("-")[-1].lower()
+        log_root_path = (
+            Path("logs") / "rsl_rl" / agent_cfg.experiment_name / task_name
+        ).resolve()
+        if cfg.checkpoint_file is not None:
+            resume_path = Path(cfg.checkpoint_file)
+            if not resume_path.exists():
+                raise FileNotFoundError(f"Checkpoint file not found: {resume_path}")
+            print(f"[INFO]: Loading checkpoint: {resume_path.name}")
+        elif cfg.wandb_run_path is not None:
+            resume_path, was_cached = get_wandb_checkpoint_path(
+                log_root_path, Path(cfg.wandb_run_path)
+            )
+            # Extract run_id and checkpoint name from path for display.
+            run_id = resume_path.parent.name
+            checkpoint_name = resume_path.name
+            cached_str = "cached" if was_cached else "downloaded"
+            print(
+                f"[INFO]: Loading checkpoint: {checkpoint_name} (run: {run_id}, {cached_str})"
+            )
+        else:
+            # `get_checkpoint_path` defaults to checkpoint=r".*" which can match
+            # TensorBoard events etc. and breaks torch.load — only RSL-RL model files.
+            resume_path = get_checkpoint_path(
+                log_root_path,
+                run_dir=".*",
+                checkpoint=r"model_\d+\.pt$",
+            )
+            print(
+                "[INFO]: Using latest run / checkpoint under "
+                f"{log_root_path}: {resume_path.parent.name} / {resume_path.name}"
+            )
+        log_dir = resume_path.parent
+
+    if cfg.num_envs is not None:
+        env_cfg.scene.num_envs = cfg.num_envs
+    if cfg.video_height is not None:
+        env_cfg.viewer.height = cfg.video_height
+    if cfg.video_width is not None:
+        env_cfg.viewer.width = cfg.video_width
+
+    render_mode = "rgb_array" if (TRAINED_MODE and cfg.video) else None
+    if cfg.video and DUMMY_MODE:
+        print(
+            "[WARN] Video recording with dummy agents is disabled (no checkpoint/log_dir)."
         )
-  log_dir: Path | None = None
-  resume_path: Path | None = None
-  if TRAINED_MODE:
-    log_root_path = (Path("logs") / "rsl_rl" / agent_cfg.experiment_name).resolve()
-    if cfg.checkpoint_file is not None:
-      resume_path = Path(cfg.checkpoint_file)
-      if not resume_path.exists():
-        raise FileNotFoundError(f"Checkpoint file not found: {resume_path}")
-      print(f"[INFO]: Loading checkpoint: {resume_path.name}")
-    else:
-      if cfg.wandb_run_path is None:
-        raise ValueError(
-          "`wandb_run_path` is required when `checkpoint_file` is not provided."
+    env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=render_mode)
+
+    if TRAINED_MODE and cfg.video:
+        print("[INFO] Recording videos during play")
+        assert log_dir is not None  # log_dir is set in TRAINED_MODE block
+        env = VideoRecorder(
+            env,
+            video_folder=log_dir / "videos" / "play",
+            step_trigger=lambda step: step == 0,
+            video_length=cfg.video_length,
+            disable_logger=True,
         )
-      resume_path, was_cached = get_wandb_checkpoint_path(
-        log_root_path, Path(cfg.wandb_run_path)
-      )
-      # Extract run_id and checkpoint name from path for display.
-      run_id = resume_path.parent.name
-      checkpoint_name = resume_path.name
-      cached_str = "cached" if was_cached else "downloaded"
-      print(
-        f"[INFO]: Loading checkpoint: {checkpoint_name} (run: {run_id}, {cached_str})"
-      )
-    log_dir = resume_path.parent
 
-  if cfg.num_envs is not None:
-    env_cfg.scene.num_envs = cfg.num_envs
-  if cfg.video_height is not None:
-    env_cfg.viewer.height = cfg.video_height
-  if cfg.video_width is not None:
-    env_cfg.viewer.width = cfg.video_width
+    env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+    if DUMMY_MODE:
+        action_shape: tuple[int, ...] = env.unwrapped.action_space.shape
+        if cfg.agent == "zero":
 
-  render_mode = "rgb_array" if (TRAINED_MODE and cfg.video) else None
-  if cfg.video and DUMMY_MODE:
-    print(
-      "[WARN] Video recording with dummy agents is disabled (no checkpoint/log_dir)."
-    )
-  env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=render_mode)
+            class PolicyZero:
+                def __call__(self, obs) -> torch.Tensor:
+                    del obs
+                    return torch.zeros(action_shape, device=env.unwrapped.device)
 
-  if TRAINED_MODE and cfg.video:
-    print("[INFO] Recording videos during play")
-    assert log_dir is not None  # log_dir is set in TRAINED_MODE block
-    env = VideoRecorder(
-      env,
-      video_folder=log_dir / "videos" / "play",
-      step_trigger=lambda step: step == 0,
-      video_length=cfg.video_length,
-      disable_logger=True,
-    )
+            policy = PolicyZero()
+        else:
 
-  env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
-  if DUMMY_MODE:
-    action_shape: tuple[int, ...] = env.unwrapped.action_space.shape
-    if cfg.agent == "zero":
+            class PolicyRandom:
+                def __call__(self, obs) -> torch.Tensor:
+                    del obs
+                    return 2 * torch.rand(action_shape, device=env.unwrapped.device) - 1
 
-      class PolicyZero:
-        def __call__(self, obs) -> torch.Tensor:
-          del obs
-          return torch.zeros(action_shape, device=env.unwrapped.device)
-
-      policy = PolicyZero()
+            policy = PolicyRandom()
     else:
+        runner_cls = load_runner_cls(task_id) or MjlabOnPolicyRunner
+        runner = runner_cls(env, asdict(agent_cfg), device=device)
+        runner.load(
+            str(resume_path), load_cfg={"actor": True}, strict=True, map_location=device
+        )
+        policy = runner.get_inference_policy(device=device)
 
-      class PolicyRandom:
-        def __call__(self, obs) -> torch.Tensor:
-          del obs
-          return 2 * torch.rand(action_shape, device=env.unwrapped.device) - 1
+    # Handle "auto" viewer selection.
+    if cfg.viewer == "auto":
+        has_display = bool(
+            os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+        )
+        resolved_viewer = "native" if has_display else "viser"
+        del has_display
+    else:
+        resolved_viewer = cfg.viewer
 
-      policy = PolicyRandom()
-  else:
-    runner_cls = load_runner_cls(task_id) or MjlabOnPolicyRunner
-    runner = runner_cls(env, asdict(agent_cfg), device=device)
-    load_runner_checkpoint_compat(
-      runner,
-      str(resume_path),
-      load_cfg={"actor": True},
-      strict=True,
-      map_location=device,
-    )
-    policy = runner.get_inference_policy(device=device)
+    if resolved_viewer == "native":
+        NativeMujocoViewer(env, policy).run()
+    elif resolved_viewer == "viser":
+        ViserPlayViewer(env, policy).run()
+    else:
+        raise RuntimeError(f"Unsupported viewer backend: {resolved_viewer}")
 
-  # Handle "auto" viewer selection.
-  if cfg.viewer == "auto":
-    has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
-    resolved_viewer = "native" if has_display else "viser"
-    del has_display
-  else:
-    resolved_viewer = cfg.viewer
-
-  if resolved_viewer == "native":
-    NativeMujocoViewer(env, policy).run()
-  elif resolved_viewer == "viser":
-    ViserPlayViewer(env, policy).run()
-  else:
-    raise RuntimeError(f"Unsupported viewer backend: {resolved_viewer}")
-
-  env.close()
+    env.close()
 
 
 def main():
-  # Parse first argument to choose the task.
-  # Import tasks to populate the registry.
-  import mjlab.tasks  # noqa: F401
-  from local_tasks import register_local_tasks
+    # Parse first argument to choose the task.
+    # Import tasks to populate the registry.
+    import mjlab.tasks  # noqa: F401
+    import src.tasks
 
-  register_local_tasks()
+    all_tasks = list_tasks()
+    chosen_task, remaining_args = tyro.cli(
+        tyro.extras.literal_type_from_choices(all_tasks),
+        add_help=False,
+        return_unknown_args=True,
+        config=mjlab.TYRO_FLAGS,
+    )
 
-  all_tasks = list_tasks()
-  chosen_task, remaining_args = tyro.cli(
-    tyro.extras.literal_type_from_choices(all_tasks),
-    add_help=False,
-    return_unknown_args=True,
-    config=mjlab.TYRO_FLAGS,
-  )
+    # Parse the rest of the arguments + allow overriding env_cfg and agent_cfg.
+    agent_cfg = load_rl_cfg(chosen_task)
 
-  # Parse the rest of the arguments + allow overriding env_cfg and agent_cfg.
-  agent_cfg = load_rl_cfg(chosen_task)
+    args = tyro.cli(
+        PlayConfig,
+        args=remaining_args,
+        default=PlayConfig(),
+        prog=sys.argv[0] + f" {chosen_task}",
+        config=mjlab.TYRO_FLAGS,
+    )
+    del remaining_args, agent_cfg
 
-  args = tyro.cli(
-    PlayConfig,
-    args=remaining_args,
-    default=PlayConfig(),
-    prog=sys.argv[0] + f" {chosen_task}",
-    config=mjlab.TYRO_FLAGS,
-  )
-  del remaining_args, agent_cfg
-
-  run_play(chosen_task, args)
+    run_play(chosen_task, args)
 
 
 if __name__ == "__main__":
-  main()
+    main()

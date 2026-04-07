@@ -5,7 +5,6 @@ base factory that robot-specific jump tasks can customize.
 """
 
 from copy import deepcopy
-
 from dataclasses import dataclass
 
 import mujoco
@@ -14,10 +13,9 @@ import torch
 from mjlab.entity import EntityCfg
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.envs import ManagerBasedRlEnvCfg
-from mjlab.envs.mdp import dr
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers import SceneEntityCfg, TerminationTermCfg
-from mjlab.managers.event_manager import EventTermCfg, requires_model_fields
+from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.sensor import (
     ContactMatch,
@@ -39,14 +37,9 @@ class CubeObstacleOffsetCfg:
     rgba: tuple[float, float, float, float] = (0.75, 0.45, 0.20, 1.0)
 
 
-@dataclass(frozen=True)
-class CubeHeightResetCfg:
-    height_range: tuple[float, float] = (0.10, 0.15)
-
-
 DEFAULT_CUBE_OFFSET = CubeObstacleOffsetCfg(
-    offset=(1.5, 0.0, 0.06),
-    size=(0.8, 0.30, 0.06),
+    offset=(0.8, 0.0, 0.1),
+    size=(0.12, 0.6, 0.1),
     rgba=(0.75, 0.45, 0.20, 1.0),
 )
 
@@ -112,9 +105,7 @@ def reset_cube_line(
             _line_y_positions(env_ids, env.num_envs, spacing, robot_spawn_xy[1])
             + cube_offset.offset[1]
         )
-    cube_geom_ids = asset.indexing.geom_ids
-    cube_half_height = env.sim.model.geom_size[env_ids, cube_geom_ids[0], 2]
-    positions[:, 2] = cube_half_height
+    positions[:, 2] = cube_offset.offset[2]
     orientations = root_states[:, 3:7]
 
     asset.write_mocap_pose_to_sim(
@@ -122,33 +113,9 @@ def reset_cube_line(
     )
 
 
-@requires_model_fields("geom_size", "geom_rbound", "geom_aabb")
-def reset_cube_height(
-    env: ManagerBasedRlEnv,
-    env_ids: torch.Tensor | None,
-    height_range: tuple[float, float],
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("cube", geom_names=("cube_geom",)),
-) -> None:
-    """Sample a cube height per reset while keeping xy size unchanged."""
-    min_height, max_height = height_range
-    if min_height <= 0.0 or max_height <= 0.0:
-        raise ValueError("Cube height range must be positive.")
-    if min_height > max_height:
-        raise ValueError("Cube height range must satisfy min <= max.")
-
-    dr.geom_size(
-        env=env,
-        env_ids=env_ids,
-        asset_cfg=asset_cfg,
-        operation="abs",
-        distribution="uniform",
-        axes=[2],
-        ranges=(0.5 * min_height, 0.5 * max_height),
-    )
-
-
 def _get_cube_spec(
-    size: tuple[float, float, float], rgba: tuple[float, float, float, float]
+    size: tuple[float, float, float],
+    rgba: tuple[float, float, float, float],
 ) -> mujoco.MjSpec:
     spec = mujoco.MjSpec()
     body = spec.worldbody.add_body(name="cube")
@@ -175,6 +142,282 @@ def get_jump_cube_cfg(
     )
 
 
+def add_jump_rewards(
+    cfg: ManagerBasedRlEnvCfg,
+    *,
+    foot_names: tuple[str, ...],
+    robot_spawn_xy: tuple[float, float],
+    obstacle_height: float,
+    obstacle_start_x: float,
+    obstacle_center_x: float,
+    obstacle_end_x: float,
+    obstacle_goal_x: float,
+    site_names: tuple[str, ...],
+    base_body_name: str,
+    feet_ground_sensor_name: str,
+    feet_cube_sensor_name: str,
+    knee_cube_sensor_name: str,
+) -> None:
+    """Collect jump-task reward tuning in one place."""
+    # Remove generic locomotion shaping that tends to over-constrain jump behavior.
+    for reward_name in ("foot_gait", "foot_clearance", "stand_still"):
+        cfg.rewards.pop(reward_name, None)
+
+    front_foot_indices = tuple(
+        idx for idx, name in enumerate(foot_names) if name.upper().startswith("F")
+    )
+    if not front_foot_indices:
+        front_foot_indices = tuple(range(min(2, len(foot_names))))
+    rear_foot_indices = tuple(
+        idx for idx in range(len(foot_names)) if idx not in front_foot_indices
+    )
+    front_site_names = tuple(site_names[idx] for idx in front_foot_indices)
+    rear_site_names = tuple(site_names[idx] for idx in rear_foot_indices)
+
+    cfg.rewards["pose"].params["std_standing"] = {
+        r".*(FR|FL|RR|RL)_hip_joint.*": 0.05,
+        r".*(FR|FL|RR|RL)_thigh_joint.*": 0.1,
+        r".*(FR|FL|RR|RL)_calf_joint.*": 0.15,
+    }
+    cfg.rewards["pose"].params["std_walking"] = {
+        r".*(FR|FL|RR|RL)_hip_joint.*": 0.15,
+        r".*(FR|FL|RR|RL)_thigh_joint.*": 0.35,
+        r".*(FR|FL|RR|RL)_calf_joint.*": 0.5,
+    }
+    cfg.rewards["pose"].params["std_running"] = {
+        r".*(FR|FL|RR|RL)_hip_joint.*": 0.15,
+        r".*(FR|FL|RR|RL)_thigh_joint.*": 0.35,
+        r".*(FR|FL|RR|RL)_calf_joint.*": 0.5,
+    }
+    cfg.rewards["body_orientation_l2"].weight = -0.5
+    cfg.rewards["track_linear_velocity"].weight = 3.0
+    cfg.rewards["track_angular_velocity"].weight = 0.25
+    cfg.rewards["body_ang_vel"].weight = -0.025
+    cfg.rewards["action_rate_l2"].weight = -0.02
+    cfg.rewards["foot_slip"].weight = -0.1
+    cfg.rewards["body_orientation_l2"].params["asset_cfg"].body_names = (
+        base_body_name,
+    )
+    cfg.rewards["body_ang_vel"].params["asset_cfg"].body_names = (base_body_name,)
+    cfg.rewards["foot_slip"].params["asset_cfg"].site_names = site_names
+    cfg.rewards["track_linear_velocity"].params["std"] = 0.20
+    cfg.rewards["track_angular_velocity"].params["std"] = 0.25
+
+    cfg.rewards["centerline"] = RewardTermCfg(
+        func=jump_mdp.centerline_penalty,
+        weight=-2.0,
+        params={
+            "target_y": robot_spawn_xy[1],
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    cfg.rewards["obstacle_progress"] = RewardTermCfg(
+        func=jump_mdp.obstacle_progress,
+        weight=20.0,
+        params={
+            "start_x": robot_spawn_xy[0],
+            "goal_x": obstacle_goal_x,
+            "contact_sensor_name": feet_cube_sensor_name,
+            "contact_required_x": obstacle_start_x,
+            "min_forward_alignment": 0.6,
+            "alignment_power": 2.0,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    cfg.rewards["pre_obstacle_front_foot_lift"] = RewardTermCfg(
+        func=jump_mdp.front_swing_clearance_reward,
+        weight=18.0,
+        params={
+            "start_x": obstacle_start_x - 0.28,
+            "end_x": obstacle_start_x - 0.01,
+            "target_height": obstacle_height + 0.01,
+            "ground_sensor_name": feet_ground_sensor_name,
+            "cube_sensor_name": feet_cube_sensor_name,
+            "std": 0.04,
+            "min_forward_alignment": 0.7,
+            "alignment_power": 3.0,
+            "foot_indices": front_foot_indices,
+            "asset_cfg": SceneEntityCfg("robot", site_names=front_site_names),
+        },
+    )
+    cfg.rewards["pre_obstacle_front_contact"] = RewardTermCfg(
+        func=jump_mdp.swing_contact_penalty_before_obstacle,
+        weight=-6.0,
+        params={
+            "start_x": obstacle_start_x - 0.28,
+            "end_x": obstacle_start_x - 0.01,
+            "ground_sensor_name": feet_ground_sensor_name,
+            "cube_sensor_name": feet_cube_sensor_name,
+            "foot_indices": front_foot_indices,
+            "min_forward_alignment": 0.6,
+            "alignment_power": 2.0,
+            "desired_contact_height": obstacle_height * 0.7,
+            "contact_margin": 0.02,
+            "asset_cfg": SceneEntityCfg("robot", site_names=front_site_names),
+        },
+    )
+    cfg.rewards["pre_obstacle_twist"] = RewardTermCfg(
+        func=jump_mdp.pre_obstacle_twist_penalty,
+        weight=-10.0,
+        params={
+            "start_x": obstacle_start_x - 0.34,
+            "end_x": obstacle_start_x + 0.06,
+            "heading_weight": 1.5,
+            "yaw_rate_weight": 1.0,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    cfg.rewards["rear_stance_push"] = RewardTermCfg(
+        func=jump_mdp.rear_stance_push_reward,
+        weight=18.0,
+        params={
+            "start_x": obstacle_start_x - 0.30,
+            "end_x": obstacle_start_x + 0.03,
+            "ground_sensor_name": feet_ground_sensor_name,
+            "front_foot_indices": front_foot_indices,
+            "rear_foot_indices": rear_foot_indices,
+            "front_target_height": obstacle_height + 0.01,
+            "front_min_height": 0.04,
+            "target_speed": 1.5,
+            "target_rear_force": 90.0,
+            "min_forward_alignment": 0.7,
+            "alignment_power": 3.0,
+            "front_asset_cfg": SceneEntityCfg("robot", site_names=front_site_names),
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    cfg.rewards["rear_early_air"] = RewardTermCfg(
+        func=jump_mdp.rear_air_penalty_before_takeoff,
+        weight=-8.0,
+        params={
+            "start_x": obstacle_start_x - 0.30,
+            "end_x": obstacle_start_x - 0.01,
+            "ground_sensor_name": feet_ground_sensor_name,
+            "front_foot_indices": front_foot_indices,
+            "rear_foot_indices": rear_foot_indices,
+            "front_target_height": obstacle_height + 0.01,
+            "front_min_height": 0.04,
+            "min_forward_alignment": 0.7,
+            "alignment_power": 3.0,
+            "front_asset_cfg": SceneEntityCfg("robot", site_names=front_site_names),
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    cfg.rewards["feet_on_cube_top"] = RewardTermCfg(
+        func=jump_mdp.feet_on_top_surface,
+        weight=10.0,
+        params={
+            "sensor_name": feet_cube_sensor_name,
+            "top_height": obstacle_height,
+            "height_tolerance": 0.05,
+            "approach_x": obstacle_start_x - 0.10,
+            "leave_x": obstacle_end_x + 0.04,
+            "min_forward_alignment": 0.6,
+            "alignment_power": 2.0,
+            "asset_cfg": SceneEntityCfg("robot", site_names=("FR", "FL", "RR", "RL")),
+        },
+    )
+    cfg.rewards["rear_obstacle_clearance"] = RewardTermCfg(
+        func=jump_mdp.rear_swing_clearance_reward,
+        weight=14.0,
+        params={
+            "start_x": obstacle_start_x - 0.02,
+            "end_x": obstacle_end_x + 0.16,
+            "target_height": obstacle_height + 0.08,
+            "ground_sensor_name": feet_ground_sensor_name,
+            "cube_sensor_name": feet_cube_sensor_name,
+            "std": 0.05,
+            "min_forward_alignment": 0.65,
+            "alignment_power": 2.0,
+            "foot_indices": rear_foot_indices,
+            "asset_cfg": SceneEntityCfg("robot", site_names=rear_site_names),
+        },
+    )
+    cfg.rewards["obstacle_crossing_bonus"] = RewardTermCfg(
+        func=jump_mdp.obstacle_crossing_bonus,
+        weight=130.0,
+        params={
+            "goal_x": obstacle_goal_x,
+            "contact_sensor_name": feet_cube_sensor_name,
+            "min_forward_alignment": 0.7,
+            "alignment_power": 3.0,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    cfg.rewards["obstacle_approach_speed"] = RewardTermCfg(
+        func=jump_mdp.obstacle_approach_speed,
+        weight=5.0,
+        params={
+            "goal_x": obstacle_goal_x,
+            "target_speed": 1.2,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    cfg.rewards["obstacle_stall_penalty"] = RewardTermCfg(
+        func=jump_mdp.obstacle_stall_penalty,
+        weight=-3.0,
+        params={
+            "goal_x": obstacle_goal_x,
+            "speed_threshold": 0.25,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    cfg.rewards["knee_contact"] = RewardTermCfg(
+        func=jump_mdp.knee_contact_penalty,
+        weight=-4.0,
+        params={"sensor_name": knee_cube_sensor_name},
+    )
+    cfg.rewards["persistent_air"] = RewardTermCfg(
+        func=jump_mdp.persistent_air_penalty,
+        weight=-6.0,
+        params={
+            "sensor_name": feet_ground_sensor_name,
+            "air_time_threshold": 0.35,
+            "max_excess_air_time": 0.75,
+            "require_single_swing": True,
+            "goal_x": obstacle_goal_x,
+            "only_before_crossing": True,
+        },
+    )
+
+
+def add_jump_terminations(
+    cfg: ManagerBasedRlEnvCfg,
+    *,
+    robot_spawn_xy: tuple[float, float],
+    nonfoot_ground_sensor_name: str,
+) -> None:
+    """Collect jump-task termination tuning in one place."""
+    cfg.terminations["illegal_contact"] = TerminationTermCfg(
+        func=velocity_mdp.illegal_contact,
+        params={"sensor_name": nonfoot_ground_sensor_name},
+    )
+    cfg.terminations["off_track"] = TerminationTermCfg(
+        func=jump_mdp.off_track,
+        params={
+            "target_y": robot_spawn_xy[1],
+            "max_offset": 0.45,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    cfg.terminations["moved_backward"] = TerminationTermCfg(
+        func=jump_mdp.moved_backward,
+        params={
+            "min_x": robot_spawn_xy[0] - 0.15,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    cfg.terminations["stuck_in_x"] = TerminationTermCfg(
+        func=jump_mdp.stuck_in_x,
+        params={
+            "min_progress": 0.015,
+            "grace_steps": 100,
+            "max_stuck_steps": 50,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+
+
 def make_jump_env_cfg(
     robot_cfg: EntityCfg,
     foot_names: tuple[str, ...],
@@ -183,7 +426,6 @@ def make_jump_env_cfg(
     play: bool = False,
     robot_spawn_xy: tuple[float, float] = (0.0, 0.0),
     cube_offset: CubeObstacleOffsetCfg = DEFAULT_CUBE_OFFSET,
-    cube_height_reset: CubeHeightResetCfg | None = CubeHeightResetCfg(),
     line_spacing: float = 1.5,
     shared_layout: bool = True,
     base_body_name: str = "base_link",
@@ -253,13 +495,10 @@ def make_jump_env_cfg(
     cfg.curriculum.pop("command_vel", None)
 
     geom_names = tuple(f"{name}_foot_collision" for name in foot_names)
-    obstacle_half_length = cube_offset.size[0]
-    obstacle_length = 2.0 * obstacle_half_length
-    obstacle_start_x = robot_spawn_xy[0] + cube_offset.offset[0] - obstacle_half_length
+    obstacle_start_x = robot_spawn_xy[0] + cube_offset.offset[0] - cube_offset.size[0]
     obstacle_center_x = robot_spawn_xy[0] + cube_offset.offset[0]
-    obstacle_end_x = robot_spawn_xy[0] + cube_offset.offset[0] + obstacle_half_length
-    # Finish on the cube top after advancing through most of its x-length.
-    obstacle_goal_x = obstacle_start_x + 0.75 * obstacle_length
+    obstacle_end_x = robot_spawn_xy[0] + cube_offset.offset[0] + cube_offset.size[0]
+    obstacle_goal_x = obstacle_end_x + 0.2
 
     critic_obstacle_state = deepcopy(critic_height_map)
     critic_obstacle_state.func = jump_mdp.privileged_obstacle_state
@@ -307,26 +546,7 @@ def make_jump_env_cfg(
         fields=("found",),
         reduce="none",
         num_slots=1,
-        track_air_time=True,
     )
-    nonfoot_cube_cfg = ContactSensorCfg(
-        name="nonfoot_cube_contact",
-        primary=ContactMatch(
-            mode="geom",
-            entity="robot",
-            pattern=r".*_collision\d*$",
-            exclude=tuple(geom_names),
-        ),
-        secondary=ContactMatch(mode="body", pattern="cube", entity="cube"),
-        secondary_policy="any",
-        fields=("found",),
-        reduce="none",
-        num_slots=1,
-    )
-    # Optional jump-specific sensor for knee / shank impacts.
-    # Uncomment this together with the reward block below if you want a more
-    # specific obstacle-contact penalty than `nonfoot_ground_touch`.
-    #
     knee_cube_cfg = ContactSensorCfg(
         name="knee_cube_contact",
         primary=ContactMatch(
@@ -344,16 +564,8 @@ def make_jump_env_cfg(
         feet_ground_cfg,
         nonfoot_ground_cfg,
         feet_cube_cfg,
-        nonfoot_cube_cfg,
         knee_cube_cfg,
     )
-
-    ## Original ver.
-    # cfg.scene.sensors = (cfg.scene.sensors or ()) + (
-    #     feet_ground_cfg,
-    #     nonfoot_ground_cfg,
-    #     feet_cube_cfg,
-    # )
 
     joint_pos_action = cfg.actions["joint_pos"]
     assert isinstance(joint_pos_action, JointPositionActionCfg)
@@ -368,289 +580,20 @@ def make_jump_env_cfg(
 
     cfg.events["foot_friction"].params["asset_cfg"].geom_names = geom_names
     cfg.events["base_com"].params["asset_cfg"].body_names = (base_body_name,)
-
-    cfg.rewards["pose"].params["std_standing"] = {
-        r".*(FR|FL|RR|RL)_hip_joint.*": 0.05,
-        r".*(FR|FL|RR|RL)_thigh_joint.*": 0.1,
-        r".*(FR|FL|RR|RL)_calf_joint.*": 0.15,
-    }
-    cfg.rewards["pose"].params["std_walking"] = {
-        r".*(FR|FL|RR|RL)_hip_joint.*": 0.15,
-        r".*(FR|FL|RR|RL)_thigh_joint.*": 0.35,
-        r".*(FR|FL|RR|RL)_calf_joint.*": 0.5,
-    }
-    cfg.rewards["pose"].params["std_running"] = {
-        r".*(FR|FL|RR|RL)_hip_joint.*": 0.15,
-        r".*(FR|FL|RR|RL)_thigh_joint.*": 0.35,
-        r".*(FR|FL|RR|RL)_calf_joint.*": 0.5,
-    }
-    cfg.rewards["body_orientation_l2"].weight = -1.0
-    cfg.rewards["track_linear_velocity"].weight = 3.0
-    cfg.rewards["track_angular_velocity"].weight = 0.25
-    cfg.rewards["body_orientation_l2"].weight = -0.5
-    cfg.rewards["body_ang_vel"].weight = -0.025
-    cfg.rewards["action_rate_l2"].weight = -0.02
-    cfg.rewards["stand_still"].weight = 0.0
-    cfg.rewards["foot_gait"].params["offset"] = [0.0, 0.5, 0.5, 0.0]
-    cfg.rewards["body_orientation_l2"].params["asset_cfg"].body_names = (
-        base_body_name,
-    )
-    cfg.rewards["body_ang_vel"].params["asset_cfg"].body_names = (base_body_name,)
-    cfg.rewards["foot_clearance"].params["asset_cfg"].site_names = site_names
-    cfg.rewards["foot_slip"].params["asset_cfg"].site_names = site_names
-    cfg.rewards["track_linear_velocity"].params["std"] = 0.20
-    cfg.rewards["track_angular_velocity"].params["std"] = 0.25
-
-    cfg.rewards["centerline"] = RewardTermCfg(
-        func=jump_mdp.centerline_penalty,
-        weight=-5.0,
-        params={
-            "target_y": robot_spawn_xy[1],
-            "asset_cfg": SceneEntityCfg("robot"),
-        },
-    )
-    cfg.rewards["obstacle_progress"] = RewardTermCfg(
-        func=jump_mdp.obstacle_progress,
-        weight=20.0,
-        params={
-            "start_x": robot_spawn_xy[0],
-            "goal_x": obstacle_goal_x,
-            "asset_cfg": SceneEntityCfg("robot"),
-        },
-    )
-    cfg.rewards["feet_on_cube"] = RewardTermCfg(
-        func=jump_mdp.feet_on_obstacle,
-        weight=6.0,
-        params={
-            "sensor_name": feet_cube_cfg.name,
-            "approach_x": obstacle_start_x - 0.15,
-            "leave_x": obstacle_goal_x,
-            "asset_cfg": SceneEntityCfg("robot"),
-        },
-    )
-    cfg.rewards["feet_on_cube_top"] = RewardTermCfg(
-        func=jump_mdp.feet_on_top_surface,
-        weight=18.0,
-        params={
-            "sensor_name": feet_cube_cfg.name,
-            "top_height": None,
-            "height_tolerance": 0.05,
-            "approach_x": obstacle_start_x - 0.10,
-            "leave_x": obstacle_goal_x,
-            "min_forward_alignment": 0.6,
-            "alignment_power": 2.0,
-            "asset_cfg": SceneEntityCfg("robot", site_names=("FR", "FL", "RR", "RL")),
-            "obstacle_cfg": SceneEntityCfg("cube"),
-            "top_height_offset": 0.0,
-        },
-    )
-    cfg.rewards["cube_top_heading"] = RewardTermCfg(
-        func=jump_mdp.cube_top_heading_reward,
-        weight=6.0,
-        params={
-            "sensor_name": feet_cube_cfg.name,
-            "top_height": None,
-            "height_tolerance": 0.05,
-            "min_top_contacts": 2,
-            "min_forward_alignment": 0.7,
-            "asset_cfg": SceneEntityCfg("robot", site_names=("FR", "FL", "RR", "RL")),
-            "obstacle_cfg": SceneEntityCfg("cube"),
-            "top_height_offset": 0.0,
-        },
-    )
-    cfg.rewards["cube_top_min_height"] = RewardTermCfg(
-        func=jump_mdp.cube_top_min_height_penalty,
-        weight=-30.0,
-        params={
-            "sensor_name": feet_cube_cfg.name,
-            "min_base_height_offset": 0.24,
-            "top_height": None,
-            "height_tolerance": 0.05,
-            "min_top_contacts": 2,
-            "terrain_height": 0.0,
-            "asset_cfg": SceneEntityCfg("robot"),
-            "feet_asset_cfg": SceneEntityCfg(
-                "robot", site_names=("FR", "FL", "RR", "RL")
-            ),
-            "obstacle_cfg": SceneEntityCfg("cube"),
-            "top_height_offset": 0.0,
-        },
-    )
-    cfg.rewards["cube_top_upright"] = RewardTermCfg(
-        func=jump_mdp.cube_top_upright_reward,
-        weight=12.0,
-        params={
-            "sensor_name": feet_cube_cfg.name,
-            "top_height": None,
-            "height_tolerance": 0.05,
-            "min_top_contacts": 2,
-            "asset_cfg": SceneEntityCfg("robot"),
-            "feet_asset_cfg": SceneEntityCfg(
-                "robot", site_names=("FR", "FL", "RR", "RL")
-            ),
-            "obstacle_cfg": SceneEntityCfg("cube"),
-            "top_height_offset": 0.0,
-        },
-    )
-    cfg.rewards["cube_top_step"] = RewardTermCfg(
-        func=jump_mdp.cube_top_step_reward,
-        weight=10.0,
-        params={
-            "sensor_name": feet_cube_cfg.name,
-            "top_height": None,
-            "height_tolerance": 0.05,
-            "swing_clearance": 0.03,
-            "min_top_contacts": 2,
-            "min_forward_speed": 0.15,
-            "min_forward_alignment": 0.7,
-            "asset_cfg": SceneEntityCfg("robot", site_names=("FR", "FL", "RR", "RL")),
-            "obstacle_cfg": SceneEntityCfg("cube"),
-            "top_height_offset": 0.0,
-        },
-    )
-    cfg.rewards["cube_top_clearance"] = RewardTermCfg(
-        func=jump_mdp.cube_top_clearance_reward,
-        weight=6.0,
-        params={
-            "sensor_name": feet_cube_cfg.name,
-            "target_clearance": 0.04,
-            "top_height": None,
-            "height_tolerance": 0.03,
-            "min_top_contacts": 2,
-            "min_forward_speed": 0.15,
-            "asset_cfg": SceneEntityCfg("robot", site_names=("FR", "FL", "RR", "RL")),
-            "obstacle_cfg": SceneEntityCfg("cube"),
-            "top_height_offset": 0.0,
-        },
-    )
-    cfg.rewards["cube_top_gait"] = RewardTermCfg(
-        func=jump_mdp.cube_top_gait_reward,
-        weight=8.0,
-        params={
-            "sensor_name": feet_cube_cfg.name,
-            "period": 0.6,
-            "offset": [0.0, 0.5, 0.5, 0.0],
-            "threshold": 0.56,
-            "top_height": None,
-            "height_tolerance": 0.05,
-            "min_top_contacts": 2,
-            "min_forward_speed": 0.15,
-            "asset_cfg": SceneEntityCfg("robot", site_names=("FR", "FL", "RR", "RL")),
-            "obstacle_cfg": SceneEntityCfg("cube"),
-            "top_height_offset": 0.0,
-        },
-    )
-    cfg.rewards["cube_top_slip"] = RewardTermCfg(
-        func=jump_mdp.cube_top_slip_penalty,
-        weight=-6.0,
-        params={
-            "sensor_name": feet_cube_cfg.name,
-            "top_height": None,
-            "height_tolerance": 0.05,
-            "min_top_contacts": 2,
-            "min_forward_speed": 0.15,
-            "asset_cfg": SceneEntityCfg("robot", site_names=("FR", "FL", "RR", "RL")),
-            "obstacle_cfg": SceneEntityCfg("cube"),
-            "top_height_offset": 0.0,
-        },
-    )
-    cfg.rewards["obstacle_crossing_bonus"] = RewardTermCfg(
-        func=jump_mdp.obstacle_crossing_bonus,
-        weight=100.0,
-        params={
-            "goal_x": obstacle_goal_x,
-            "asset_cfg": SceneEntityCfg("robot"),
-        },
-    )
-    cfg.rewards["obstacle_approach_speed"] = RewardTermCfg(
-        func=jump_mdp.obstacle_approach_speed,
-        weight=5.0,
-        params={
-            "goal_x": obstacle_goal_x,
-            "target_speed": 1.2,
-            "asset_cfg": SceneEntityCfg("robot"),
-        },
-    )
-    cfg.rewards["obstacle_stall_penalty"] = RewardTermCfg(
-        func=jump_mdp.obstacle_stall_penalty,
-        weight=-3.0,
-        params={
-            "goal_x": obstacle_goal_x,
-            "speed_threshold": 0.25,
-            "asset_cfg": SceneEntityCfg("robot"),
-        },
-    )
-    cfg.rewards["knee_contact"] = RewardTermCfg(
-        func=jump_mdp.knee_contact_penalty,
-        weight=-4.0,
-        params={"sensor_name": knee_cube_cfg.name},
-    )
-    cfg.rewards["nonfoot_cube_contact"] = RewardTermCfg(
-        func=jump_mdp.contact_count_penalty,
-        weight=-16.0,
-        params={"sensor_name": nonfoot_cube_cfg.name},
-    )
-    cfg.rewards["conditional_com_height"] = RewardTermCfg(
-        func=jump_mdp.conditional_com_height_reward,
-        weight=10.0,
-        params={
-            "start_x": obstacle_start_x - 0.10,
-            "end_x": obstacle_end_x + 0.10,
-            "target_height_offset": 0.22,
-            "std": 0.06,
-            "terrain_height": 0.0,
-            "asset_cfg": SceneEntityCfg("robot"),
-            "obstacle_cfg": SceneEntityCfg("cube"),
-        },
-    )
-    cfg.rewards["distance_to_clear_goal"] = RewardTermCfg(
-        func=jump_mdp.distance_to_clear_goal,
-        weight=3.0,
-        params={
-            "goal_x": obstacle_goal_x,
-            "clamp_distance": 2.0,
-            "asset_cfg": SceneEntityCfg("robot"),
-        },
-    )
-    cfg.rewards["cube_top_goal_progress"] = RewardTermCfg(
-        func=jump_mdp.cube_top_goal_progress,
-        weight=20.0,
-        params={
-            "sensor_name": feet_cube_cfg.name,
-            "start_x": obstacle_center_x,
-            "goal_x": obstacle_goal_x,
-            "top_height": None,
-            "height_tolerance": 0.05,
-            "min_top_contacts": 2,
-            "asset_cfg": SceneEntityCfg("robot", site_names=("FR", "FL", "RR", "RL")),
-            "obstacle_cfg": SceneEntityCfg("cube"),
-            "top_height_offset": 0.0,
-        },
-    )
-    cfg.rewards["persistent_air"] = RewardTermCfg(
-        func=jump_mdp.persistent_air_penalty,
-        weight=-6.0,
-        params={
-            "sensor_name": feet_ground_cfg.name,
-            "air_time_threshold": 0.35,
-            "max_excess_air_time": 0.75,
-            "require_single_swing": True,
-            "goal_x": obstacle_goal_x,
-            "only_before_crossing": True,
-        },
-    )
-    cfg.rewards["forward_alignment"] = RewardTermCfg(
-        func=jump_mdp.forward_alignment_reward,
-        weight=1.0,
-        params={"asset_cfg": SceneEntityCfg("robot")},
-    )
-    cfg.rewards["post_crossing_heading"] = RewardTermCfg(
-        func=jump_mdp.post_crossing_heading_reward,
-        weight=3.0,
-        params={
-            "goal_x": obstacle_goal_x,
-            "asset_cfg": SceneEntityCfg("robot"),
-        },
+    add_jump_rewards(
+        cfg,
+        robot_spawn_xy=robot_spawn_xy,
+        obstacle_height=obstacle_height,
+        obstacle_start_x=obstacle_start_x,
+        obstacle_center_x=obstacle_center_x,
+        obstacle_end_x=obstacle_end_x,
+        obstacle_goal_x=obstacle_goal_x,
+        site_names=site_names,
+        foot_names=foot_names,
+        base_body_name=base_body_name,
+        feet_ground_sensor_name=feet_ground_cfg.name,
+        feet_cube_sensor_name=feet_cube_cfg.name,
+        knee_cube_sensor_name=knee_cube_cfg.name,
     )
 
     twist_cmd = cfg.commands["twist"]
@@ -674,15 +617,6 @@ def make_jump_env_cfg(
             "asset_cfg": SceneEntityCfg("robot"),
         },
     )
-    if cube_height_reset is not None:
-        cfg.events["reset_cube_height"] = EventTermCfg(
-            func=reset_cube_height,
-            mode="reset",
-            params={
-                "height_range": cube_height_reset.height_range,
-                "asset_cfg": SceneEntityCfg("cube", geom_names=("cube_geom",)),
-            },
-        )
     cfg.events["reset_cube"] = EventTermCfg(
         func=reset_cube_line,
         mode="reset",
@@ -694,66 +628,10 @@ def make_jump_env_cfg(
             "asset_cfg": SceneEntityCfg("cube"),
         },
     )
-
-    cfg.terminations["illegal_contact"] = TerminationTermCfg(
-        func=velocity_mdp.illegal_contact,
-        params={"sensor_name": nonfoot_ground_cfg.name},
-    )
-    cfg.terminations["off_track"] = TerminationTermCfg(
-        func=jump_mdp.off_track,
-        params={
-            "target_y": robot_spawn_xy[1],
-            "max_offset": 0.45,
-            "asset_cfg": SceneEntityCfg("robot"),
-        },
-    )
-    cfg.terminations["moved_backward"] = TerminationTermCfg(
-        func=jump_mdp.moved_backward,
-        params={
-            "min_x": robot_spawn_xy[0] - 0.15,
-            "asset_cfg": SceneEntityCfg("robot"),
-        },
-    )
-    cfg.terminations["goal_reached"] = TerminationTermCfg(
-        func=jump_mdp.reached_goal_on_cube,
-        params={
-            "goal_x": obstacle_goal_x,
-            "sensor_name": feet_cube_cfg.name,
-            "top_height": None,
-            "height_tolerance": 0.05,
-            "min_top_contacts": 2,
-            "hold_steps": 3,
-            "min_forward_alignment": 0.8,
-            "terrain_height": 0.0,
-            "asset_cfg": SceneEntityCfg("robot", site_names=("FR", "FL", "RR", "RL")),
-            "obstacle_cfg": SceneEntityCfg("cube"),
-            "top_height_offset": 0.0,
-        },
-    )
-    cfg.terminations["low_body_on_cube"] = TerminationTermCfg(
-        func=jump_mdp.low_body_on_cube,
-        params={
-            "sensor_name": feet_cube_cfg.name,
-            "min_base_height_offset": 0.18,
-            "top_height": None,
-            "height_tolerance": 0.05,
-            "min_top_contacts": 2,
-            "hold_steps": 4,
-            "terrain_height": 0.0,
-            "asset_cfg": SceneEntityCfg("robot", site_names=("FR", "FL", "RR", "RL")),
-            "obstacle_cfg": SceneEntityCfg("cube"),
-            "top_height_offset": 0.0,
-        },
-    )
-
-    cfg.terminations["stuck_in_x"] = TerminationTermCfg(
-        func=jump_mdp.stuck_in_x,
-        params={
-            "min_progress": 0.015,
-            "grace_steps": 100,
-            "max_stuck_steps": 50,
-            "asset_cfg": SceneEntityCfg("robot"),
-        },
+    add_jump_terminations(
+        cfg,
+        robot_spawn_xy=robot_spawn_xy,
+        nonfoot_ground_sensor_name=nonfoot_ground_cfg.name,
     )
 
     if play:

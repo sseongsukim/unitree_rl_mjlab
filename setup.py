@@ -5,6 +5,7 @@ from setuptools import setup, find_packages
 # Minimum dependencies required prior to installation
 INSTALL_REQUIRES = [
     "mjlab==1.2.0",
+    "opencv-python",
 ]
 
 # Installation operation
