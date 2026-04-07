@@ -1,6 +1,6 @@
 """RL configuration for Unitree Go2 jump task."""
 
-from mjlab.rl import (
+from src.rl_core.rsl_rl.rl.config import (
     RslRlModelCfg,
     RslRlOnPolicyRunnerCfg,
     RslRlPpoAlgorithmCfg,

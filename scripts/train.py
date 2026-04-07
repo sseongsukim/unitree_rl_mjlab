@@ -154,7 +154,7 @@ def launch_training(task_id: str, args: TrainConfig | None = None):
 
     # Create log directory once before launching workers.
     task_name = task_id.split("-")[-1].lower()
-    log_root_path = Path("logs") / "rsl_rl" / args.agent.experiment_name / task_name
+    log_root_path = Path("logs") / "rsl_rl" / task_name
     log_root_path.resolve()
     log_dir_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     if args.agent.run_name:
