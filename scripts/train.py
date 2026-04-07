@@ -18,9 +18,11 @@ from mjlab.utils.gpu import select_gpus
 from mjlab.utils.os import dump_yaml, get_checkpoint_path
 from mjlab.utils.torch import configure_torch_backends
 from mjlab.utils.wrappers import VideoRecorder
+from local_tasks import register_local_tasks
 
 import src.tasks.velocity.config.go2
-import src.tasks.leap.config.go2
+
+register_local_tasks()
 
 
 @dataclass(frozen=True)
