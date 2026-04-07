@@ -26,25 +26,10 @@ register_local_tasks()
 
 @dataclass(frozen=True)
 class PlayConfig:
-<<<<<<< HEAD
-  agent: Literal["zero", "random", "trained"] = "trained"
-  checkpoint_file: str | None = None
-  motion_file: str | None = None
-  num_envs: int | None = 1
-  device: str | None = None
-  video: bool = False
-  video_length: int = 200
-  video_height: int | None = None
-  video_width: int | None = None
-  camera: int | str | None = None
-  viewer: Literal["auto", "native", "viser"] = "auto"
-  no_terminations: bool = False
-  """Disable all termination conditions (useful for viewing motions with dummy agents)."""
-=======
     agent: Literal["zero", "random", "trained"] = "trained"
     checkpoint_file: str | None = None
     motion_file: str | None = None
-    num_envs: int | None = None
+    num_envs: int | None = 1
     device: str | None = None
     video: bool = False
     video_length: int = 200
@@ -53,9 +38,7 @@ class PlayConfig:
     camera: int | str | None = None
     viewer: Literal["auto", "native", "viser"] = "auto"
     no_terminations: bool = False
-    wandb_run_path: str | None = None
     """Disable all termination conditions (useful for viewing motions with dummy agents)."""
->>>>>>> 5727062 (combine JS with SS)
 
     # Internal flag used by demo script.
     _demo_mode: tyro.conf.Suppress[bool] = False

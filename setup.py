@@ -6,6 +6,7 @@ from setuptools import setup, find_packages
 INSTALL_REQUIRES = [
     "mjlab==1.2.0",
     "opencv-python",
+    "gymnasium",
 ]
 
 # Installation operation

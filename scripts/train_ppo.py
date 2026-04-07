@@ -11,16 +11,18 @@ from typing import Literal, cast
 import tyro
 
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
-from mjlab.rl import MjlabOnPolicyRunner, RslRlBaseRunnerCfg, RslRlVecEnvWrapper
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
 from mjlab.utils.gpu import select_gpus
 from mjlab.utils.os import dump_yaml, get_checkpoint_path
 from mjlab.utils.torch import configure_torch_backends
 from mjlab.utils.wrappers import VideoRecorder
+
 from local_tasks import register_local_tasks
 
-import src.tasks.velocity.config.go2
+from src.rl_core.rsl_rl.rl.vecenv_wrapper import RslRlVecEnvWrapper
+from src.rl_core.rsl_rl.rl.config import RslRlBaseRunnerCfg
+from src.rl_core.rsl_rl.rl.runner import MjlabOnPolicyRunner
 
 register_local_tasks()
 
@@ -212,6 +214,7 @@ def main():
         add_help=False,
         return_unknown_args=True,
         config=mjlab.TYRO_FLAGS,
+        default="Unitree-Go2-Jump",
     )
 
     args = tyro.cli(
