@@ -20,9 +20,27 @@ from mjlab.utils.torch import configure_torch_backends
 from mjlab.utils.wrappers import VideoRecorder
 from local_tasks import register_local_tasks
 
+from checkpoint_compat import load_runner_checkpoint_compat
+
 import src.tasks.velocity.config.go2
 
 register_local_tasks()
+
+
+def _latest_model_checkpoint(path: Path) -> Path:
+    if path.is_file():
+        return path
+    checkpoints = sorted(
+        path.glob("**/model_*.pt"),
+        key=lambda p: (
+            p.parent.name,
+            int(p.stem.split("_")[-1]) if p.stem.split("_")[-1].isdigit() else -1,
+            p.name,
+        ),
+    )
+    if not checkpoints:
+        raise FileNotFoundError(f"No model_*.pt checkpoint found under: {path}")
+    return checkpoints[-1]
 
 
 @dataclass(frozen=True)
@@ -30,7 +48,8 @@ class TrainConfig:
     env: ManagerBasedRlEnvCfg
     agent: RslRlBaseRunnerCfg
     motion_file: str | None = None
-    video: bool = False
+    pretrained_checkpoint_file: str | None = None
+    video: bool = True
     video_length: int = 200
     video_interval: int = 2000
     enable_nan_guard: bool = False
@@ -41,7 +60,14 @@ class TrainConfig:
     def from_task(task_id: str) -> "TrainConfig":
         env_cfg = load_env_cfg(task_id)
         agent_cfg = load_rl_cfg(task_id)
-        return TrainConfig(env=env_cfg, agent=agent_cfg)
+        pretrained_checkpoint_file = None
+        if task_id == "Unitree-Go2-Leap":
+            pretrained_checkpoint_file = "logs/rsl_rl/flat"
+        return TrainConfig(
+            env=env_cfg,
+            agent=agent_cfg,
+            pretrained_checkpoint_file=pretrained_checkpoint_file,
+        )
 
 
 def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
@@ -108,6 +134,11 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
         resume_path = get_checkpoint_path(
             log_root_path, cfg.agent.load_run, cfg.agent.load_checkpoint
         )
+    pretrained_path: Path | None = None
+    if resume_path is None and cfg.pretrained_checkpoint_file is not None:
+        pretrained_path = _latest_model_checkpoint(
+            Path(cfg.pretrained_checkpoint_file).expanduser()
+        ).resolve()
 
     # Only record videos on rank 0 to avoid multiple workers writing to the same files.
     if cfg.video and rank == 0:
@@ -125,6 +156,11 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
     agent_cfg = asdict(cfg.agent)
     env_cfg = asdict(cfg.env)
 
+    using_recurrent_models = any(
+        agent_cfg.get(key, {}).get("class_name") == "RNNModel"
+        for key in ("actor", "critic")
+    )
+
     runner_cls = load_runner_cls(task_id)
     if runner_cls is None:
         runner_cls = MjlabOnPolicyRunner
@@ -136,6 +172,23 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
     if resume_path is not None:
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
         runner.load(str(resume_path))
+    elif pretrained_path is not None:
+        if using_recurrent_models:
+            print(
+                "[INFO]: Skipping pretrained checkpoint load because the current "
+                "actor/critic use RNNModel and the default pretrained checkpoint "
+                "was produced by a different architecture."
+            )
+        else:
+            print(f"[INFO]: Initializing from pretrained checkpoint: {pretrained_path}")
+            load_runner_checkpoint_compat(
+                runner,
+                str(pretrained_path),
+                load_cfg={"actor": True, "critic": True},
+                strict=False,
+                map_location=device,
+                set_iteration=False,
+            )
 
     # Only write config files from rank 0 to avoid race conditions.
     if rank == 0:
@@ -154,7 +207,7 @@ def launch_training(task_id: str, args: TrainConfig | None = None):
 
     # Create log directory once before launching workers.
     task_name = task_id.split("-")[-1].lower()
-    log_root_path = Path("logs") / "rsl_rl" / args.agent.experiment_name / task_name
+    log_root_path = Path("logs") / "rsl_rl" / task_name
     log_root_path.resolve()
     log_dir_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     if args.agent.run_name:

@@ -186,6 +186,20 @@ def _terrain_patch_bounds(
     return x.min(dim=1).values, x.max(dim=1).values, y.mean(dim=1)
 
 
+def _terrain_patch_center(
+    env: ManagerBasedRlEnv,
+    patch_name: str,
+) -> torch.Tensor:
+    terrain = env.scene.terrain
+    assert terrain is not None, "Terrain is required for terrain-patch rewards."
+    assert (
+        patch_name in terrain.flat_patches
+    ), f"Terrain flat patch '{patch_name}' not found."
+    patches = terrain.flat_patches[patch_name]
+    env_patches = patches[terrain.terrain_levels, terrain.terrain_types]
+    return env_patches.mean(dim=1)
+
+
 def terrain_gap_foot_lift(
     env: ManagerBasedRlEnv,
     target_height: float,
@@ -195,9 +209,10 @@ def terrain_gap_foot_lift(
     post_margin_x: float = 0.12,
     y_margin: float = 0.20,
     height_tolerance: float = 0.05,
+    normalize_by_active_feet: bool = False,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Reward lifting feet while they pass through the terrain gap window."""
+    """Reward lifting each foot while it passes through the terrain gap window."""
 
     asset: Entity = env.scene[asset_cfg.name]
     foot_pos_w = asset.data.site_pos_w[:, asset_cfg.site_ids, :]
@@ -205,9 +220,7 @@ def terrain_gap_foot_lift(
     foot_y = foot_pos_w[:, :, 1]
     foot_z = foot_pos_w[:, :, 2]
 
-    spawn_x_min, spawn_x_max, spawn_center_y = _terrain_patch_bounds(
-        env, spawn_patch_name
-    )
+    _, spawn_x_max, spawn_center_y = _terrain_patch_bounds(env, spawn_patch_name)
     landing_x_min, _, landing_center_y = _terrain_patch_bounds(env, landing_patch_name)
 
     gap_start_x = spawn_x_max.unsqueeze(1)
@@ -222,8 +235,144 @@ def terrain_gap_foot_lift(
 
     height_error = (foot_z - target_height) / max(height_tolerance, 1e-6)
     foot_reward = torch.exp(-torch.square(height_error)) * active_feet.float()
+    if not normalize_by_active_feet:
+        return torch.sum(foot_reward, dim=1)
     num_active = active_feet.float().sum(dim=1)
     return torch.sum(foot_reward, dim=1) / torch.clamp(num_active, min=1.0)
+
+
+def com_height_reward(
+    env: ManagerBasedRlEnv,
+    terrain_height: float = 0.0,
+    max_height: float = 0.6,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward base height above the nominal terrain height."""
+    asset: Entity = env.scene[asset_cfg.name]
+    terrain_height_tensor = torch.full_like(
+        asset.data.root_link_pos_w[:, 2],
+        terrain_height,
+    )
+    return (asset.data.root_link_pos_w[:, 2] - terrain_height_tensor).clip(
+        max=max_height
+    )
+
+
+def vertical_distance_reward(
+    env: ManagerBasedRlEnv,
+    patch_name: str = "landing",
+    desired_base_height: float = 0.32,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Penalize vertical COM distance from the desired landing base height."""
+    asset: Entity = env.scene[asset_cfg.name]
+    landing_center = _terrain_patch_center(env, patch_name)
+    desired_z = landing_center[:, 2] + desired_base_height
+    return -torch.square(asset.data.root_link_pos_w[:, 2] - desired_z)
+
+
+def com_distance_to_goal_squared_reward(
+    env: ManagerBasedRlEnv,
+    goal_patch_name: str = "landing",
+    start_patch_name: str = "spawn",
+    min_normalization_distance: float = 0.1,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Penalize squared COM xy distance to the landing goal, normalized by jump distance."""
+    asset: Entity = env.scene[asset_cfg.name]
+    goal_xy = _terrain_patch_center(env, goal_patch_name)[:, :2]
+    _, start_x_max, _ = _terrain_patch_bounds(env, start_patch_name)
+    jump_distance = torch.clamp(
+        goal_xy[:, 0] - start_x_max,
+        min=min_normalization_distance,
+    )
+    normalized_error = (
+        asset.data.root_link_pos_w[:, :2] - goal_xy
+    ) / jump_distance.unsqueeze(1)
+    return -torch.sum(torch.square(normalized_error), dim=1)
+
+
+def com_distance_to_goal_squared_absolute_reward(
+    env: ManagerBasedRlEnv,
+    goal_patch_name: str = "landing",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Penalize absolute squared COM xy distance to the landing goal."""
+    asset: Entity = env.scene[asset_cfg.name]
+    goal_xy = _terrain_patch_center(env, goal_patch_name)[:, :2]
+    return -torch.sum(torch.square(asset.data.root_link_pos_w[:, :2] - goal_xy), dim=1)
+
+
+def swing_foot_vel_reward(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Penalize foot velocity for feet that are currently in swing."""
+    sensor: ContactSensor = env.scene[sensor_name]
+    asset: Entity = env.scene[asset_cfg.name]
+    assert sensor.data.found is not None
+
+    foot_contact = sensor.data.found > 0
+    if foot_contact.ndim > 2:
+        foot_contact = foot_contact.any(dim=-1)
+    swing_mask = torch.logical_not(foot_contact)
+    foot_vel = torch.sum(
+        torch.square(asset.data.site_lin_vel_w[:, asset_cfg.site_ids, :]),
+        dim=2,
+    )
+    num_swing_feet = torch.sum(swing_mask.float(), dim=1)
+    return -torch.sum(foot_vel * swing_mask.float(), dim=1) / (
+        num_swing_feet + 0.001
+    )
+
+
+class stepping_freq_reward:
+    """Penalize high measured touchdown frequency."""
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        del cfg
+        self.prev_contact = torch.zeros(
+            env.num_envs,
+            0,
+            device=env.device,
+            dtype=torch.bool,
+        )
+        self.freq_ema = torch.zeros(env.num_envs, device=env.device)
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        sensor_name: str,
+        target_frequency: float = 1.5,
+        ema_alpha: float = 0.2,
+    ) -> torch.Tensor:
+        sensor: ContactSensor = env.scene[sensor_name]
+        assert sensor.data.found is not None
+
+        contact = sensor.data.found > 0
+        if contact.ndim > 2:
+            contact = contact.any(dim=-1)
+        if self.prev_contact.shape != contact.shape:
+            self.prev_contact = contact.clone()
+
+        is_reset = env.episode_length_buf == 0
+        self.prev_contact = torch.where(
+            is_reset.unsqueeze(1),
+            contact,
+            self.prev_contact,
+        )
+        touchdown = torch.logical_not(self.prev_contact) & contact
+        inst_freq = touchdown.float().sum(dim=1) / (
+            max(env.step_dt, 1e-6) * max(contact.shape[1], 1)
+        )
+        self.freq_ema = torch.where(
+            is_reset,
+            torch.zeros_like(self.freq_ema),
+            (1.0 - ema_alpha) * self.freq_ema + ema_alpha * inst_freq,
+        )
+        self.prev_contact = contact.clone()
+        return target_frequency - self.freq_ema.clip(min=target_frequency)
 
 
 def landing_patch_approach_velocity(
@@ -282,6 +431,8 @@ class terrain_landing_bonus:
         sensor_name: str,
         patch_name: str = "landing",
         y_margin: float = 0.25,
+        contact_indices: tuple[int, ...] | None = None,
+        min_contacts: int = 1,
         asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     ) -> torch.Tensor:
         sensor: ContactSensor = env.scene[sensor_name]
@@ -296,7 +447,18 @@ class terrain_landing_bonus:
         in_landing_zone = (root_pos[:, 0] >= patch_x_min) & (
             torch.abs(root_pos[:, 1] - patch_center_y) <= y_margin
         )
-        in_contact = (sensor.data.found > 0).any(dim=1)
+        foot_contact = sensor.data.found > 0
+        if foot_contact.ndim > 2:
+            foot_contact = foot_contact.any(dim=-1)
+        foot_pos_w = asset.data.site_pos_w[:, asset_cfg.site_ids, :]
+        foot_in_landing_zone = (foot_pos_w[:, :, 0] >= patch_x_min.unsqueeze(1)) & (
+            torch.abs(foot_pos_w[:, :, 1] - patch_center_y.unsqueeze(1)) <= y_margin
+        )
+        if contact_indices is not None:
+            foot_contact = foot_contact[:, contact_indices]
+            foot_in_landing_zone = foot_in_landing_zone[:, contact_indices]
+        valid_landing_contact = foot_contact & foot_in_landing_zone
+        in_contact = valid_landing_contact.sum(dim=1) >= min_contacts
         bonus = in_landing_zone & in_contact & (~self.rewarded)
         self.rewarded |= bonus
         return bonus.float()

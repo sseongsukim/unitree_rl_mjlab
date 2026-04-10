@@ -166,6 +166,7 @@ def unitree_go2_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.curriculum.pop("terrain_levels", None)
 
     if play:
+        cfg.scene.num_envs = 1
         twist_cmd = cfg.commands["twist"]
         assert isinstance(twist_cmd, UniformVelocityCommandCfg)
         twist_cmd.ranges.lin_vel_x = (-0.5, 1.0)
