@@ -149,6 +149,44 @@ def feet_on_top_surface(
     return top_contacts.mean(dim=1) * in_window.float() * heading_gate * heading_scale
 
 
+def selected_feet_on_top_surface(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    top_height: float | None,
+    height_tolerance: float,
+    approach_x: float,
+    leave_x: float,
+    foot_indices: tuple[int, ...],
+    min_forward_alignment: float = 0.5,
+    alignment_power: float = 2.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ALL_FEET_CFG,
+    obstacle_cfg: SceneEntityCfg = _DEFAULT_OBSTACLE_CFG,
+    top_height_offset: float = 0.0,
+) -> torch.Tensor:
+    """Reward top-surface contacts for a selected subset of feet."""
+    asset: Entity = env.scene[asset_cfg.name]
+    sensor: ContactSensor = env.scene[sensor_name]
+    assert sensor.data.found is not None
+
+    root_x = asset.data.root_link_pos_w[:, 0]
+    in_window = (root_x >= approach_x) & (root_x <= leave_x)
+
+    foot_contacts = (sensor.data.found[:, foot_indices] > 0).float()
+    foot_heights = asset.data.site_pos_w[:, asset_cfg.site_ids, 2]
+    if top_height is None:
+        top_height_tensor = _cube_top_height(env, obstacle_cfg) + top_height_offset
+    else:
+        top_height_tensor = torch.full_like(root_x, top_height + top_height_offset)
+    on_top_surface = (
+        torch.abs(foot_heights - top_height_tensor.unsqueeze(1)) <= height_tolerance
+    )
+    top_contacts = foot_contacts * on_top_surface.float()
+    forward_alignment = torch.clamp(torch.cos(asset.data.heading_w), min=0.0, max=1.0)
+    heading_gate = (forward_alignment >= min_forward_alignment).float()
+    heading_scale = torch.pow(forward_alignment, alignment_power)
+    return top_contacts.mean(dim=1) * in_window.float() * heading_gate * heading_scale
+
+
 def cube_top_heading_reward(
     env: ManagerBasedRlEnv,
     sensor_name: str,
@@ -637,9 +675,13 @@ def front_swing_clearance_reward(
         swing_mask = swing_mask & (~cube_contact)
 
     foot_height = asset.data.site_pos_w[:, asset_cfg.site_ids, 2]
+    # Once the foot is high enough, do not keep increasing the reward. This
+    # avoids the local optimum of lifting the front feet arbitrarily high
+    # instead of using them to progress across the obstacle.
     height_reward = torch.clamp(
         (foot_height - target_height) / max(std, 1.0e-6),
         min=0.0,
+        max=1.0,
     )
     swing_reward = (height_reward * swing_mask.float()).sum(dim=1)
     swing_count = swing_mask.float().sum(dim=1)
