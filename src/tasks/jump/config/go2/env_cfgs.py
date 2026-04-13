@@ -22,6 +22,8 @@ def unitree_go2_jump_env_cfg(
     robot_cfg=get_go2_robot_cfg(),
     foot_names=("FR", "FL", "RR", "RL"),
     site_names=("FR", "FL", "RR", "RL"),
+    front_body_names=("FL_hip", "FR_hip"),
+    rear_body_names=("RL_hip", "RR_hip"),
     play=play,
     robot_spawn_xy=robot_spawn_xy,
     cube_offset=cube_offset,

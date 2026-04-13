@@ -9,6 +9,8 @@ from __future__ import annotations
 import os
 import pathlib
 from dataclasses import asdict
+import numpy as np
+import torch
 from torch.utils.tensorboard import SummaryWriter
 
 try:
@@ -74,6 +76,29 @@ class WandbSummaryWriter(SummaryWriter):
             new_style=new_style,
         )
         wandb.log({tag: scalar_value}, step=global_step)
+
+    def add_video(
+        self,
+        tag: str,
+        vid_tensor,
+        global_step: int | None = None,
+        fps: int | float = 4,
+        walltime: float | None = None,
+    ) -> None:
+        """Log a video to both TensorBoard and W&B."""
+        if not isinstance(vid_tensor, torch.Tensor):
+            vid_tensor = torch.as_tensor(vid_tensor)
+        super().add_video(
+            tag,
+            vid_tensor,
+            global_step=global_step,
+            fps=fps,
+            walltime=walltime,
+        )
+        video = vid_tensor.detach().cpu().numpy()
+        if np.issubdtype(video.dtype, np.floating):
+            video = np.clip(video, 0.0, 255.0).astype(np.uint8)
+        wandb.log({tag: wandb.Video(video, fps=fps, format="gif")}, step=global_step)
 
     def stop(self) -> None:
         """Finish the active W&B run."""

@@ -94,6 +94,9 @@ class RslRlVecEnvWrapper(VecEnv):
     def close(self) -> None:
         return self.env.close()
 
+    def render(self):
+        return self.env.render()
+
     # Private methods.
 
     def _modify_action_space(self) -> None:

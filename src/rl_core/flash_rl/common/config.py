@@ -8,15 +8,17 @@ from typing import Any
 class FlashRlRunnerCfg:
     seed: int = 42
 
-    num_env_steps: int = 1_000_000
+    num_env_steps: int = 100_000_000
 
     num_train_envs: int = 4096
 
-    updates_per_interaction_step: int = 1
+    updates_per_interaction_step: int = 2
 
-    n_step: int = 1
+    n_step: int = 3
 
     gamma: float = 0.99
+
+    use_wandb: bool = True
 
     @property
     def num_interaction_steps(self) -> int:
@@ -27,24 +29,20 @@ class FlashRlRunnerCfg:
         return self.num_interaction_steps * self.updates_per_interaction_step
 
     @property
-    def evaluation_per_interaction_step(self) -> int:
-        return max(1, self.num_interaction_steps // 10)
-
-    @property
     def metrics_per_interaction_step(self) -> int:
-        return max(1, self.num_interaction_steps // 10)
-
-    @property
-    def recording_per_interaction_step(self) -> int:
-        return max(1, self.num_interaction_steps)
+        return 1
 
     @property
     def logging_per_interaction_step(self) -> int:
-        return max(1, self.num_interaction_steps // 100)
+        return 100
 
     @property
     def save_checkpoint_per_interaction_step(self) -> int:
         return max(1, self.num_interaction_steps)
+
+    @property
+    def eval_per_interaction_step(self) -> int:
+        return max(1, self.num_interaction_steps // 100)
 
 
 @dataclass
@@ -70,8 +68,15 @@ class FlashSACAlgorithmCfg(FlashRlAlgorithmCfg):
     agent_type: str = "flashSAC"
     device_type: str = "cuda"
 
-    buffer_max_length: int = 1_000_000
-    buffer_min_length: int = 10_000
+    env_clip_actions: float | None = 1.0
+    env_normalize_joint_actions: bool = False
+    env_joint_action_gain: float | None = 3.0
+
+    # env_normalize_joint_actions: bool = True
+    # env_joint_action_gain: float | None = None
+
+    buffer_max_length: int = 5_000_000
+    buffer_min_length: int = 100_000
     buffer_device_type: str = "cuda"
     sample_batch_size: int = 2048
 

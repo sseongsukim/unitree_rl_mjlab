@@ -1,5 +1,6 @@
 """Script to train RL agent with RSL-RL."""
 
+import copy
 import logging
 import os
 import sys
@@ -21,7 +22,11 @@ from mjlab.utils.wrappers import VideoRecorder
 from local_tasks import register_local_tasks
 
 from src.rl_core.rsl_rl.rl.vecenv_wrapper import RslRlVecEnvWrapper
-from src.rl_core.rsl_rl.rl.config import RslRlBaseRunnerCfg
+from src.rl_core.rsl_rl.rl.config import (
+    RslRlBaseRunnerCfg,
+    RslRlOnPolicyRunnerCfg,
+    RslRlRndCfg,
+)
 from src.rl_core.rsl_rl.rl.runner import MjlabOnPolicyRunner
 
 register_local_tasks()
@@ -31,8 +36,9 @@ register_local_tasks()
 class TrainConfig:
     env: ManagerBasedRlEnvCfg
     agent: RslRlBaseRunnerCfg
+    use_rnd: bool = False
     motion_file: str | None = None
-    video: bool = False
+    video: bool = True
     video_length: int = 200
     video_interval: int = 2000
     enable_nan_guard: bool = False
@@ -44,6 +50,26 @@ class TrainConfig:
         env_cfg = load_env_cfg(task_id)
         agent_cfg = load_rl_cfg(task_id)
         return TrainConfig(env=env_cfg, agent=agent_cfg)
+
+
+def _apply_common_rnd_cfg(cfg: TrainConfig) -> None:
+    if not cfg.use_rnd:
+        return
+
+    if not isinstance(cfg.agent, RslRlOnPolicyRunnerCfg):
+        raise TypeError("RND is only supported for on-policy PPO configs.")
+
+    final_step = cfg.agent.max_iterations * cfg.agent.num_steps_per_env
+    cfg.agent.obs_groups["rnd_state"] = ("actor",)
+    cfg.agent.algorithm.rnd_cfg = RslRlRndCfg(
+        weight=1.0,
+        weight_schedule={
+            "mode": "linear",
+            "initial_step": 0,
+            "final_step": final_step,
+            "final_value": 0.0,
+        },
+    )
 
 
 def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
@@ -102,6 +128,16 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
         cfg=cfg.env, device=device, render_mode="rgb_array" if cfg.video else None
     )
 
+    eval_env = None
+    if rank == 0:
+        eval_env_cfg = copy.deepcopy(cfg.env)
+        eval_env_cfg.scene.num_envs = 1
+        eval_env = ManagerBasedRlEnv(
+            cfg=eval_env_cfg,
+            device=device,
+            render_mode="rgb_array" if cfg.video else None,
+        )
+
     log_root_path = log_dir.parent  # Go up from specific run dir to experiment dir.
 
     resume_path: Path | None = None
@@ -131,7 +167,16 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
     if runner_cls is None:
         runner_cls = MjlabOnPolicyRunner
 
-    runner_kwargs = {}
+    runner_kwargs = {
+        "eval_env": (
+            RslRlVecEnvWrapper(eval_env, clip_actions=cfg.agent.clip_actions)
+            if eval_env is not None
+            else None
+        ),
+        "eval_interval": cfg.agent.eval_interval,
+        "eval_video": cfg.video and rank == 0,
+        "eval_video_length": cfg.video_length,
+    }
     runner = runner_cls(env, agent_cfg, str(log_dir), device, **runner_kwargs)
 
     runner.add_git_repo_to_log(__file__)
@@ -153,6 +198,7 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
 
 def launch_training(task_id: str, args: TrainConfig | None = None):
     args = args or TrainConfig.from_task(task_id)
+    _apply_common_rnd_cfg(args)
 
     # Create log directory once before launching workers.
     task_name = task_id.split("-")[-1].lower()

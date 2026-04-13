@@ -8,6 +8,7 @@ from pathlib import Path
 
 
 _LOCAL_TASK_MODULES = (
+  "src.tasks.empty.config.go2",
   "src.tasks.jump.config.go2",
   "src.tasks.leap.config.go2",
 )

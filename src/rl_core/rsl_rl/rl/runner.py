@@ -1,5 +1,6 @@
 import os
 
+import numpy as np
 import torch
 import wandb
 
@@ -23,6 +24,10 @@ class MjlabOnPolicyRunner(OnPolicyRunner):
         train_cfg: dict,
         log_dir: str | None = None,
         device: str = "cpu",
+        eval_env: VecEnv | None = None,
+        eval_interval: int | None = None,
+        eval_video: bool = True,
+        eval_video_length: int = 200,
     ) -> None:
         # Strip None-valued optional configs so MLPModel doesn't receive them.
         for key in ("actor", "critic"):
@@ -30,6 +35,10 @@ class MjlabOnPolicyRunner(OnPolicyRunner):
                 for opt in ("cnn_cfg", "distribution_cfg"):
                     if train_cfg[key].get(opt) is None:
                         train_cfg[key].pop(opt, None)
+        self.eval_env = eval_env
+        self.eval_interval = eval_interval
+        self.eval_video = eval_video
+        self.eval_video_length = eval_video_length
         super().__init__(env, train_cfg, log_dir, device)
 
     def export_policy_to_onnx(
@@ -135,6 +144,87 @@ class MjlabOnPolicyRunner(OnPolicyRunner):
                 "common_step_counter"
             ]
         return infos
+
+    def after_iteration(self, it: int) -> None:
+        if self.eval_env is None or self.logger.writer is None:
+            return
+        if self.eval_interval is None or it == 0 or it % self.eval_interval != 0:
+            return
+
+        eval_metrics = self._evaluate_policy(record_video=self.eval_video)
+        for key, value in eval_metrics.items():
+            if key == "Eval/video":
+                continue
+            self.logger.writer.add_scalar(key, value, it)  # type: ignore[arg-type]
+        if "Eval/video" in eval_metrics and hasattr(self.logger.writer, "add_video"):
+            self.logger.writer.add_video(  # type: ignore[call-arg]
+                "Eval/video",
+                eval_metrics["Eval/video"],
+                global_step=it,
+                fps=30,
+            )
+
+    def _evaluate_policy(
+        self, record_video: bool = False
+    ) -> dict[str, float | torch.Tensor]:
+        assert self.eval_env is not None
+
+        def _extract_rgb_frame(frame) -> np.ndarray | None:
+            if frame is None:
+                return None
+            frame = np.asarray(frame)
+            if frame.ndim == 4:
+                frame = frame[0]
+            if frame.ndim != 3:
+                return None
+            if frame.shape[-1] == 3:
+                return frame
+            if frame.shape[0] == 3:
+                return np.transpose(frame, (1, 2, 0))
+            return None
+
+        self.alg.eval_mode()
+        policy = self.get_inference_policy(device=self.device)
+        obs, _ = self.eval_env.reset()
+        obs = obs.to(self.device)
+
+        episode_return = 0.0
+        episode_length = 0
+        done = False
+        video_frames: list[np.ndarray] = []
+
+        if record_video:
+            frame = _extract_rgb_frame(self.eval_env.render())
+            if frame is not None:
+                video_frames.append(frame)
+
+        while not done and episode_length < self.eval_env.max_episode_length:
+            with torch.no_grad():
+                actions = policy(obs)
+            obs, rewards, dones, _ = self.eval_env.step(actions.to(self.eval_env.device))
+            obs = obs.to(self.device)
+
+            episode_return += float(rewards[0].item())
+            episode_length += 1
+            done = bool(dones[0].item())
+
+            if record_video:
+                frame = _extract_rgb_frame(self.eval_env.render())
+                if frame is not None:
+                    video_frames.append(frame)
+
+        self.alg.train_mode()
+
+        metrics: dict[str, float | torch.Tensor] = {
+            "Eval/episode_return": episode_return,
+            "Eval/episode_length": float(episode_length),
+        }
+        if video_frames:
+            video_frames = video_frames[: self.eval_video_length]
+            video = np.stack(video_frames, axis=0)
+            video = np.expand_dims(video, axis=0).transpose(0, 1, 4, 2, 3)
+            metrics["Eval/video"] = torch.from_numpy(video)
+        return metrics
 
 
 class ProjectOnPolicyRunner(MjlabOnPolicyRunner):

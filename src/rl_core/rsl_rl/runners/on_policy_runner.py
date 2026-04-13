@@ -145,6 +145,7 @@ class OnPolicyRunner:
                     self.alg.rnd.weight if self.cfg["algorithm"]["rnd_cfg"] else None
                 ),
             )
+            self.after_iteration(it)
 
             # Save model
             if self.logger.writer is not None and it % self.cfg["save_interval"] == 0:
@@ -231,6 +232,10 @@ class OnPolicyRunner:
     def add_git_repo_to_log(self, repo_file_path: str) -> None:
         """Register a repository path whose git status should be logged."""
         self.logger.git_status_repos.append(repo_file_path)
+
+    def after_iteration(self, it: int) -> None:
+        """Hook for subclasses to run extra work after logging each iteration."""
+        return
 
     def _configure_multi_gpu(self) -> None:
         """Configure multi-gpu training."""

@@ -33,6 +33,30 @@ class RslRlModelCfg:
 
 
 @dataclass
+class RslRlRndCfg:
+    """Config for the Random Network Distillation extension."""
+
+    num_outputs: int = 32
+    """Embedding dimension used by target and predictor."""
+    predictor_hidden_dims: Tuple[int, ...] = (256, 256)
+    """Predictor MLP hidden dimensions."""
+    target_hidden_dims: Tuple[int, ...] = (256, 256)
+    """Target MLP hidden dimensions."""
+    activation: str = "elu"
+    """Activation function used in both RND networks."""
+    weight: float = 1.0
+    """Intrinsic reward scale before dt scaling."""
+    learning_rate: float = 1e-3
+    """Optimizer learning rate for the predictor network."""
+    state_normalization: bool = True
+    """Whether to normalize the RND input state."""
+    reward_normalization: bool = True
+    """Whether to normalize intrinsic rewards."""
+    weight_schedule: dict[str, Any] | None = None
+    """Optional schedule for the intrinsic reward weight."""
+
+
+@dataclass
 class RslRlPpoAlgorithmCfg:
     """Config for the PPO algorithm."""
 
@@ -40,8 +64,8 @@ class RslRlPpoAlgorithmCfg:
     """The number of learning epochs per update."""
     num_mini_batches: int = 4
     """The number of mini-batches per update.
-  mini batch size = num_envs * num_steps / num_mini_batches
-  """
+    mini batch size = num_envs * num_steps / num_mini_batches
+    """
     learning_rate: float = 1e-3
     """The learning rate."""
     schedule: Literal["adaptive", "fixed"] = "adaptive"
@@ -69,6 +93,8 @@ class RslRlPpoAlgorithmCfg:
   """
     optimizer: Literal["adam", "adamw", "sgd", "rmsprop"] = "adam"
     """The optimizer to use."""
+    rnd_cfg: RslRlRndCfg | None = None
+    """Optional Random Network Distillation configuration."""
     share_cnn_encoders: bool = False
     """Share CNN encoders between actor and critic."""
     class_name: str = "PPO"
@@ -116,6 +142,10 @@ class RslRlBaseRunnerCfg:
     upload_model: bool = True
     """Whether to upload model files (.pt, .onnx) to W&B on save. Set to
   False to keep metric logging but avoid storage usage. Default is True."""
+
+    @property
+    def eval_interval(self) -> int:
+        return max(1, self.max_iterations // 100)
 
 
 @dataclass
