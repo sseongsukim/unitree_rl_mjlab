@@ -38,7 +38,7 @@ class TrainConfig:
     agent: RslRlBaseRunnerCfg
     use_rnd: bool = False
     motion_file: str | None = None
-    video: bool = True
+    video: bool = False
     video_length: int = 200
     video_interval: int = 2000
     enable_nan_guard: bool = False

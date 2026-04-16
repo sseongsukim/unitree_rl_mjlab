@@ -97,7 +97,7 @@ class RslRlPpoAlgorithmCfg:
     """Optional Random Network Distillation configuration."""
     share_cnn_encoders: bool = False
     """Share CNN encoders between actor and critic."""
-    class_name: str = "PPO"
+    class_name: str = "src.rl_core.rsl_rl.algorithms.ppo:PPO"
     """Algorithm class name resolved by RSL-RL."""
 
 
