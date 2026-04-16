@@ -159,6 +159,7 @@ def add_jump_rewards(
     feet_ground_sensor_name: str,
     feet_cube_sensor_name: str,
     knee_cube_sensor_name: str,
+    nonfoot_ground_sensor_name: str,
 ) -> None:
     """Collect jump-task reward tuning in one place."""
     # Remove generic locomotion shaping that tends to over-constrain jump behavior.
@@ -749,6 +750,7 @@ def make_jump_env_cfg(
         feet_ground_sensor_name=feet_ground_cfg.name,
         feet_cube_sensor_name=feet_cube_cfg.name,
         knee_cube_sensor_name=knee_cube_cfg.name,
+        nonfoot_ground_sensor_name=nonfoot_ground_cfg.name,
     )
 
     twist_cmd = cfg.commands["twist"]
