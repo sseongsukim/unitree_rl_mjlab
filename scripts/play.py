@@ -29,7 +29,7 @@ class PlayConfig:
     agent: Literal["zero", "random", "trained"] = "trained"
     checkpoint_file: str | None = None
     motion_file: str | None = None
-    num_envs: int | None = 1
+    num_envs: int | None = None
     device: str | None = None
     video: bool = False
     video_length: int = 200
@@ -38,6 +38,7 @@ class PlayConfig:
     camera: int | str | None = None
     viewer: Literal["auto", "native", "viser"] = "auto"
     no_terminations: bool = False
+    wandb_run_path: str | None = None
     """Disable all termination conditions (useful for viewing motions with dummy agents)."""
 
     # Internal flag used by demo script.
@@ -87,10 +88,8 @@ def run_play(task_id: str, cfg: PlayConfig):
     log_dir: Path | None = None
     resume_path: Path | None = None
     if TRAINED_MODE:
-        task_name = task_id.split("-")[-1].lower()
-        log_root_path = (
-            Path("logs") / "rsl_rl" / agent_cfg.experiment_name / task_name
-        ).resolve()
+        task_name = agent_cfg.experiment_name
+        log_root_path = (Path("logs") / "rsl_rl" / task_name).resolve()
         if cfg.checkpoint_file is not None:
             resume_path = Path(cfg.checkpoint_file)
             if not resume_path.exists():
