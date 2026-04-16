@@ -16,13 +16,52 @@ from src.tasks.leap.config.go2.terrains import make_leap_gap_terrain_cfg
 from src.tasks.velocity.config.go2.env_cfgs import unitree_go2_flat_env_cfg
 
 
+def _make_go2_terrain_scan(debug_vis: bool = True) -> RayCastSensorCfg:
+    """Create the Go2 base-link terrain scan used by leap-style observations."""
+    return RayCastSensorCfg(
+        name="terrain_scan",
+        frame=ObjRef(type="body", name="base_link", entity="robot"),
+        ray_alignment="yaw",
+        pattern=GridPatternCfg(size=(1.6, 1.0), resolution=0.1),
+        max_distance=5.0,
+        exclude_parent_body=True,
+        debug_vis=debug_vis,
+        viz=RayCastSensorCfg.VizCfg(show_normals=True),
+    )
+
+
+def unitree_go2_flat_pre_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+    """Create flat-terrain Go2 pretraining config with leap observation shape."""
+
+    cfg = unitree_go2_flat_env_cfg(play=play)
+
+    terrain_scan = _make_go2_terrain_scan(debug_vis=play)
+    cfg.scene.sensors = tuple(
+        s for s in (cfg.scene.sensors or ()) if s.name != terrain_scan.name
+    ) + (terrain_scan,)
+
+    cfg.observations["actor"].terms["height_scan"] = ObservationTermCfg(
+        func=envs_mdp.height_scan,
+        params={"sensor_name": terrain_scan.name},
+        noise=Unoise(n_min=-0.1, n_max=0.1),
+        scale=1 / terrain_scan.max_distance,
+    )
+    cfg.observations["critic"].terms["height_scan"] = ObservationTermCfg(
+        func=envs_mdp.height_scan,
+        params={"sensor_name": terrain_scan.name},
+        scale=1 / terrain_scan.max_distance,
+    )
+
+    return cfg
+
+
 def unitree_go2_leap_env_cfg(
     play: bool = False,
     terrain_size: tuple[float, float] = (16.0, 4.0),
-    num_rows: int = 7,
+    num_rows: int = 10,
     num_cols: int = 10,
-    gap_width_range: tuple[float, float] = (0.20, 0.50),
-    spawn_offset_from_gap: float = 1.5,
+    gap_width_range: tuple[float, float] = (0.20, 0.80),
+    spawn_offset_from_gap: float = 2.0,
 ) -> ManagerBasedRlEnvCfg:
     """Create Unitree Go2 leap environment with a terrain gap."""
 
@@ -43,16 +82,10 @@ def unitree_go2_leap_env_cfg(
         landing_length=5.0,
         spawn_offset_from_gap=spawn_offset_from_gap,
     )
-    terrain_scan = RayCastSensorCfg(
-        name="terrain_scan",
-        frame=ObjRef(type="body", name="base_link", entity="robot"),
-        ray_alignment="yaw",
-        pattern=GridPatternCfg(size=(1.6, 1.0), resolution=0.1),
-        max_distance=5.0,
-        exclude_parent_body=True,
-        debug_vis=True,
-        viz=RayCastSensorCfg.VizCfg(show_normals=True),
-    )
+    cfg.scene.terrain.terrain_generator.curriculum = False
+    cfg.curriculum.pop("terrain_levels", None)
+
+    terrain_scan = _make_go2_terrain_scan()
     cfg.scene.sensors = tuple(
         s for s in (cfg.scene.sensors or ()) if s.name != "terrain_scan"
     ) + (terrain_scan,)
@@ -75,18 +108,24 @@ def unitree_go2_leap_env_cfg(
     )
 
     # ==================== Rewards ==================== #
+    cfg.rewards["track_linear_velocity"].weight = 0.25
+    cfg.rewards["track_angular_velocity"].weight = 0.05
+    cfg.rewards["foot_gait"].weight = 0.25
+
+    cfg.rewards.pop("foot_clearance", None)
+
     cfg.rewards["world_x_velocity"] = RewardTermCfg(
         func=mdp.world_x_velocity_reward,
-        weight=1.0,
+        weight=0.5,
         params={
             "clamp_min": 0.0,
-            "clamp_max": 1.5,
+            "clamp_max": 1.2,
             "asset_cfg": SceneEntityCfg("robot"),
         },
     )
     cfg.rewards["landing_patch_approach"] = RewardTermCfg(
         func=mdp.landing_patch_approach_velocity,
-        weight=2.5,
+        weight=5.0,
         params={
             "patch_name": "landing",
             "clamp_min": 0.0,
@@ -103,24 +142,37 @@ def unitree_go2_leap_env_cfg(
             "sensor_name": "feet_ground_contact",
             "patch_name": "landing",
             "y_margin": 0.25,
+            "contact_indices": (2, 3),
+            "min_contacts": 2,
             "asset_cfg": SceneEntityCfg("robot"),
         },
     )
-    cfg.rewards["foot_lift_near_gap"] = RewardTermCfg(
-        func=mdp.terrain_gap_foot_lift,
-        weight=1.5,
+    cfg.rewards["com_distance_to_goal_squared"] = RewardTermCfg(
+        func=mdp.com_distance_to_goal_squared_reward,
+        weight=2.0,
         params={
-            "spawn_patch_name": "spawn",
-            "landing_patch_name": "landing",
-            "target_height": 0.14,
-            "pre_margin_x": 0.06,
-            "post_margin_x": 0.10,
-            "y_margin": 0.20,
-            "height_tolerance": 0.05,
-            "asset_cfg": SceneEntityCfg(
-                "robot",
-                site_names=("FR", "FL", "RR", "RL"),
-            ),
+            "goal_patch_name": "landing",
+            "start_patch_name": "spawn",
+            "min_normalization_distance": 0.1,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    cfg.rewards["com_height"] = RewardTermCfg(
+        func=mdp.com_height_reward,
+        weight=1.0,
+        params={
+            "terrain_height": 0.0,
+            "max_height": 1.2,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    cfg.rewards["vertical_distance"] = RewardTermCfg(
+        func=mdp.vertical_distance_reward,
+        weight=1.0,
+        params={
+            "patch_name": "landing",
+            "desired_base_height": 1.2,
+            "asset_cfg": SceneEntityCfg("robot"),
         },
     )
 
@@ -174,6 +226,7 @@ def unitree_go2_leap_env_cfg(
             "asset_cfg": SceneEntityCfg("robot"),
         },
     )
+    cfg.events.pop("push_robot", None)
 
     # ==================== Terminations ==================== #
     cfg.terminations["illegal_contact"] = TerminationTermCfg(
@@ -191,25 +244,37 @@ def unitree_go2_leap_env_cfg(
     cfg.terminations["insufficient_x_progress"] = TerminationTermCfg(
         func=mdp.insufficient_x_progress,
         params={
-            "min_progress": 0.08,
-            "grace_period_s": 1.25,
+            "min_progress": 0.06,
+            "grace_period_s": 2.0,
             "asset_cfg": SceneEntityCfg("robot"),
         },
     )
+
     cfg.terminations["landing_progress"] = TerminationTermCfg(
         func=mdp.landing_progress,
         params={
             "sensor_name": "feet_ground_contact",
             "patch_name": "landing",
-            "forward_distance": 0.4,
+            "forward_distance": 0.20,
             "y_margin": 0.25,
             "asset_cfg": SceneEntityCfg("robot"),
         },
     )
 
     if play and cfg.scene.terrain.terrain_generator is not None:
+        cfg.scene.num_envs = 1
         cfg.scene.terrain.terrain_generator.curriculum = False
         cfg.scene.terrain.terrain_generator.num_rows = 4
         cfg.scene.terrain.terrain_generator.num_cols = 4
+        cfg.scene.terrain.terrain_generator.sub_terrains["gap"].gap_width_range = (
+            0.50,
+            0.50,
+        )
+        cfg.scene.terrain.terrain_generator.sub_terrains[
+            "gap"
+        ].spawn_offset_from_gap = 2.5
+        cfg.terminations.pop("insufficient_x_progress", None)
+        cfg.terminations.pop("backward_x_velocity", None)
+        cfg.terminations.pop("illegal_contact", None)
 
     return cfg
