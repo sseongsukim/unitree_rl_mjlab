@@ -20,6 +20,12 @@ class RslRlModelCfg:
   Passed to ``rsl_rl.modules.CNN``. Common keys: output_channels,
   kernel_size, stride, padding, activation, global_pool, max_pool.
   """
+    rnn_type: str = "lstm"
+    """Recurrent cell type. Used when class_name is "RNNModel"."""
+    rnn_hidden_dim: int = 256
+    """Hidden dimension of the recurrent encoder."""
+    rnn_num_layers: int = 1
+    """Number of recurrent layers."""
     distribution_cfg: dict[str, Any] | None = None
     """Distribution config dict passed to rsl_rl. Example::
 

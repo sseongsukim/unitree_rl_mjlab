@@ -3,7 +3,7 @@
 import logging
 import os
 import sys
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, cast
@@ -25,6 +25,26 @@ from checkpoint_compat import load_runner_checkpoint_compat
 import src.tasks.velocity.config.go2
 
 register_local_tasks()
+
+
+def _asdict_with_dynamic_attrs(obj):
+    """Convert dataclasses while preserving task-side dynamic config attrs."""
+    if is_dataclass(obj):
+        result = {
+            item.name: _asdict_with_dynamic_attrs(getattr(obj, item.name))
+            for item in fields(obj)
+        }
+        for key, value in vars(obj).items():
+            if key not in result:
+                result[key] = _asdict_with_dynamic_attrs(value)
+        return result
+    if isinstance(obj, dict):
+        return {key: _asdict_with_dynamic_attrs(value) for key, value in obj.items()}
+    if isinstance(obj, tuple):
+        return tuple(_asdict_with_dynamic_attrs(value) for value in obj)
+    if isinstance(obj, list):
+        return [_asdict_with_dynamic_attrs(value) for value in obj]
+    return obj
 
 
 def _latest_model_checkpoint(path: Path) -> Path:
@@ -61,8 +81,10 @@ class TrainConfig:
         env_cfg = load_env_cfg(task_id)
         agent_cfg = load_rl_cfg(task_id)
         pretrained_checkpoint_file = None
-        if task_id == "Unitree-Go2-Leap":
-            pretrained_checkpoint_file = "logs/rsl_rl/flat"
+        if task_id in ("Unitree-Go2-Leap-LSTM", "Unitree-Go2-Leap-Lstm"):
+            pretrained_checkpoint_file = "logs/rsl_rl/go2_flat_pre_lstm"
+        elif task_id in ("Unitree-Go2-Leap-GRU", "Unitree-Go2-Leap-Gru"):
+            pretrained_checkpoint_file = "logs/rsl_rl/go2_flat_pre_gru"
         return TrainConfig(
             env=env_cfg,
             agent=agent_cfg,
@@ -153,13 +175,8 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
 
     env = RslRlVecEnvWrapper(env, clip_actions=cfg.agent.clip_actions)
 
-    agent_cfg = asdict(cfg.agent)
+    agent_cfg = _asdict_with_dynamic_attrs(cfg.agent)
     env_cfg = asdict(cfg.env)
-
-    using_recurrent_models = any(
-        agent_cfg.get(key, {}).get("class_name") == "RNNModel"
-        for key in ("actor", "critic")
-    )
 
     runner_cls = load_runner_cls(task_id)
     if runner_cls is None:
@@ -173,22 +190,15 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
         runner.load(str(resume_path))
     elif pretrained_path is not None:
-        if using_recurrent_models:
-            print(
-                "[INFO]: Skipping pretrained checkpoint load because the current "
-                "actor/critic use RNNModel and the default pretrained checkpoint "
-                "was produced by a different architecture."
-            )
-        else:
-            print(f"[INFO]: Initializing from pretrained checkpoint: {pretrained_path}")
-            load_runner_checkpoint_compat(
-                runner,
-                str(pretrained_path),
-                load_cfg={"actor": True, "critic": True},
-                strict=False,
-                map_location=device,
-                set_iteration=False,
-            )
+        print(f"[INFO]: Initializing from pretrained checkpoint: {pretrained_path}")
+        load_runner_checkpoint_compat(
+            runner,
+            str(pretrained_path),
+            load_cfg={"actor": True, "critic": True},
+            strict=False,
+            map_location=device,
+            set_iteration=False,
+        )
 
     # Only write config files from rank 0 to avoid race conditions.
     if rank == 0:
@@ -206,7 +216,7 @@ def launch_training(task_id: str, args: TrainConfig | None = None):
     args = args or TrainConfig.from_task(task_id)
 
     # Create log directory once before launching workers.
-    task_name = task_id.split("-")[-1].lower()
+    task_name = args.agent.experiment_name
     log_root_path = Path("logs") / "rsl_rl" / task_name
     log_root_path.resolve()
     log_dir_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
