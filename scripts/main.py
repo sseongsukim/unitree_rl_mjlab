@@ -8,7 +8,7 @@ FLAGS = flags.FLAGS
 flags.DEFINE_integer("num_envs", 4096, "Number of environments.")
 flags.DEFINE_integer("seed", 999, "Seed number.")
 flags.DEFINE_string("agent_name", "ppo", "Agent name.")
-flags.DEFINE_string("env_name", "jump", "Task environment name.")
+flags.DEFINE_string("env_name", "flat", "Task environment name.")
 flags.DEFINE_boolean("use_rnd", True, "Enable PPO RND exploration.")
 
 

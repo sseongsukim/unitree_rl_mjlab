@@ -28,7 +28,7 @@ class RslRlModelCfg:
 
   ``None`` means deterministic output (use for critic).
   """
-    class_name: str = "MLPModel"
+    class_name: str = "src.rl_core.rsl_rl.models.mlp_model:MLPModel"
     """Model class name resolved by RSL-RL (MLPModel or CNNModel)."""
 
 

@@ -211,7 +211,6 @@ class PPO:
 
     def compute_returns(self, obs: TensorDict) -> None:
         """Compute return and advantage targets from stored transitions."""
-
         st = self.storage
         # Compute value for the last step
         last_values = self.critic(obs).detach()
