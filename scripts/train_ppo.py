@@ -12,6 +12,7 @@ from typing import Literal, cast
 import tyro
 
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
+from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
 from mjlab.utils.gpu import select_gpus
@@ -28,6 +29,7 @@ from src.rl_core.rsl_rl.rl.config import (
     RslRlRndCfg,
 )
 from src.rl_core.rsl_rl.rl.runner import MjlabOnPolicyRunner
+import src.tasks.jump.mdp as jump_mdp
 
 register_local_tasks()
 
@@ -37,6 +39,8 @@ class TrainConfig:
     env: ManagerBasedRlEnvCfg
     agent: RslRlBaseRunnerCfg
     use_rnd: bool = False
+    use_height_map: bool = True
+    symmetric_obs: bool = False
     motion_file: str | None = None
     video: bool = False
     video_length: int = 200
@@ -70,6 +74,57 @@ def _apply_common_rnd_cfg(cfg: TrainConfig) -> None:
             "final_value": 0.0,
         },
     )
+
+
+def _apply_no_height_map_observations(env_cfg: ManagerBasedRlEnvCfg) -> None:
+    """Replace jump height-map observations with compact base pose observations."""
+    removed_any = False
+    for group_name in ("actor", "critic"):
+        obs_group = env_cfg.observations.get(group_name)
+        if obs_group is None:
+            continue
+        had_height_map = obs_group.terms.pop("height_map", None) is not None
+        removed_any = had_height_map or removed_any
+        if not had_height_map:
+            continue
+        obs_group.terms.setdefault(
+            "base_position",
+            ObservationTermCfg(func=jump_mdp.base_position),
+        )
+        obs_group.terms.setdefault(
+            "base_rotation",
+            ObservationTermCfg(func=jump_mdp.base_yaw_pitch_roll),
+        )
+
+    if removed_any:
+        env_cfg.scene.sensors = tuple(
+            sensor
+            for sensor in (env_cfg.scene.sensors or ())
+            if sensor.name != "terrain_scan"
+        )
+
+
+def _apply_symmetric_observations(env_cfg: ManagerBasedRlEnvCfg) -> None:
+    """Make actor observations use the critic observation layout."""
+    critic_obs = env_cfg.observations.get("critic")
+    if critic_obs is None:
+        raise ValueError(
+            "Cannot enable symmetric observations: critic observation group is missing."
+        )
+    env_cfg.observations["actor"] = copy.deepcopy(critic_obs)
+
+
+def _metra_wrapper_kwargs(agent_cfg: RslRlBaseRunnerCfg) -> dict:
+    algorithm = agent_cfg.algorithm
+    class_name = getattr(algorithm, "class_name", "")
+    if "metra" not in class_name.lower():
+        return {}
+    return {
+        "use_skill": True,
+        "discrete_skill": getattr(algorithm, "discrete_option"),
+        "unit_length_skill": getattr(algorithm, "unit_length_option"),
+        "num_dims": getattr(algorithm, "dim_option"),
+    }
 
 
 def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
@@ -121,6 +176,18 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
             f"[INFO] NaN guard enabled, output dir: {cfg.env.sim.nan_guard.output_dir}"
         )
 
+    if not cfg.use_height_map:
+        _apply_no_height_map_observations(cfg.env)
+        if rank == 0:
+            print(
+                "[INFO] Height-map observations disabled; base pose observations enabled for actor and critic."
+            )
+
+    if cfg.symmetric_obs:
+        _apply_symmetric_observations(cfg.env)
+        if rank == 0:
+            print("[INFO] Symmetric observations enabled: actor uses critic observations.")
+
     if rank == 0:
         print(f"[INFO] Logging experiment in directory: {log_dir}")
 
@@ -158,7 +225,10 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
         )
         print("[INFO] Recording videos during training.")
 
-    env = RslRlVecEnvWrapper(env, clip_actions=cfg.agent.clip_actions)
+    wrapper_kwargs = _metra_wrapper_kwargs(cfg.agent)
+    env = RslRlVecEnvWrapper(
+        env, clip_actions=cfg.agent.clip_actions, **wrapper_kwargs
+    )
 
     agent_cfg = asdict(cfg.agent)
     env_cfg = asdict(cfg.env)
@@ -169,7 +239,9 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
 
     runner_kwargs = {
         "eval_env": (
-            RslRlVecEnvWrapper(eval_env, clip_actions=cfg.agent.clip_actions)
+            RslRlVecEnvWrapper(
+                eval_env, clip_actions=cfg.agent.clip_actions, **wrapper_kwargs
+            )
             if eval_env is not None
             else None
         ),

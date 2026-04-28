@@ -13,12 +13,14 @@ class RslRlVecEnvWrapper(VecEnv):
         clip_actions: float | None = None,
         use_skill: bool | None = None,
         discrete_skill: bool | None = None,
+        unit_length_skill: bool = True,
         num_dims: int | None = None,
     ):
         self.env = env
         self.clip_actions = clip_actions
         self.use_skill = bool(use_skill)
         self.discrete_skill = bool(discrete_skill)
+        self.unit_length_skill = unit_length_skill
         self.num_dims = num_dims
 
         self.num_envs = self.unwrapped.num_envs
@@ -99,12 +101,27 @@ class RslRlVecEnvWrapper(VecEnv):
         assert isinstance(rew, torch.Tensor)
         assert isinstance(term_or_trunc, torch.Tensor)
         dones = term_or_trunc.to(dtype=torch.long)
+        raw_final_obs = extras.get("final_obs")
+        if isinstance(raw_final_obs, dict):
+            final_obs_dict = {
+                key: value.clone()
+                for key, value in raw_final_obs.items()
+                if isinstance(value, torch.Tensor)
+            }
+        else:
+            final_obs_dict = {
+                key: value.clone()
+                for key, value in obs_dict.items()
+                if isinstance(value, torch.Tensor)
+            }
         if not self.cfg.is_finite_horizon:
             extras["time_outs"] = truncated
         if self.use_skill:
+            final_obs_dict = self._add_skills_to_obs(final_obs_dict)
             self._resample_done_skills(term_or_trunc)
             extras["skills"] = self.current_skills.clone()
         obs_dict = self._add_skills_to_obs(obs_dict)
+        extras["final_obs"] = TensorDict(final_obs_dict, batch_size=[self.num_envs])
         return (
             TensorDict(obs_dict, batch_size=[self.num_envs]),
             rew,
@@ -171,7 +188,9 @@ class RslRlVecEnvWrapper(VecEnv):
             return skills
 
         skills = torch.randn(num_skills, self.num_dims, device=self.device)
-        return skills / skills.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        if self.unit_length_skill:
+            skills = skills / skills.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        return skills
 
     def _resample_done_skills(self, dones: torch.Tensor) -> None:
         assert self.current_skills is not None

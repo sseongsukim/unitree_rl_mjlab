@@ -102,6 +102,38 @@ class RslRlPpoAlgorithmCfg:
 
 
 @dataclass
+class RslRlMetraAlgorithmCfg(RslRlPpoAlgorithmCfg):
+    """Config for PPO with METRA intrinsic rewards."""
+
+    class_name: str = "src.rl_core.rsl_rl.algorithms.metra:METRAPPO"
+    """Algorithm class name resolved by RSL-RL."""
+    dim_option: int = 2
+    """Dimension of the METRA skill/option vector."""
+    discrete_option: bool = False
+    """Whether to sample one-hot discrete options instead of continuous options."""
+    unit_length_option: bool = True
+    """Whether continuous options are normalized to unit length."""
+    metra_reward_coef: float = 10.0
+    """Fixed scale for the METRA reward added to the task reward."""
+    metra_reward_coef_schedule: dict[str, Any] | None = None
+    """Optional schedule for the METRA reward coefficient."""
+    traj_encoder_learning_rate: float = 1e-4
+    """Learning rate for the trajectory encoder."""
+    traj_encoder_num_epochs: int = 1
+    """Number of trajectory-encoder optimization epochs per rollout."""
+    traj_encoder_num_mini_batches: int = 4
+    """Number of mini-batches for each trajectory-encoder epoch."""
+    dual_reg: bool = True
+    """Whether to apply METRA dual metric regularization."""
+    dual_lam: float = 30.0
+    """Initial METRA dual coefficient."""
+    dual_slack: float = 1e-3
+    """Upper clamp for the METRA dual constraint penalty."""
+    dual_learning_rate: float = 1e-4
+    """Learning rate for the METRA dual coefficient."""
+
+
+@dataclass
 class RslRlBaseRunnerCfg:
     seed: int = 42
     """The seed for the experiment. Default is 42."""
@@ -166,3 +198,21 @@ class RslRlOnPolicyRunnerCfg(RslRlBaseRunnerCfg):
     """The critic configuration."""
     algorithm: RslRlPpoAlgorithmCfg = field(default_factory=RslRlPpoAlgorithmCfg)
     """The algorithm configuration."""
+
+
+@dataclass
+class RslRlMetraRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Runner config for PPO with a METRA trajectory encoder."""
+
+    class_name: str = "src.rl_core.rsl_rl.runners.metra_runner:METRARunner"
+    """Runner class name."""
+    traj_encoder: RslRlModelCfg = field(
+        default_factory=lambda: RslRlModelCfg(
+            hidden_dims=(256, 256, 256),
+            activation="relu",
+            obs_normalization=True,
+        )
+    )
+    """Trajectory encoder model configuration."""
+    algorithm: RslRlMetraAlgorithmCfg = field(default_factory=RslRlMetraAlgorithmCfg)
+    """The METRA PPO algorithm configuration."""

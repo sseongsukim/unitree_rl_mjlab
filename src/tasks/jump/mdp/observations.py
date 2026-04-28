@@ -15,6 +15,36 @@ if TYPE_CHECKING:
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 
 
+def base_position(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Return the robot base position as x, y, z."""
+    asset: Entity = env.scene[asset_cfg.name]
+    return asset.data.root_link_pos_w
+
+
+def base_yaw_pitch_roll(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Return the robot base orientation as yaw, pitch, roll."""
+    asset: Entity = env.scene[asset_cfg.name]
+    quat = asset.data.root_link_quat_w
+    w, x, y, z = quat.unbind(dim=-1)
+
+    roll = torch.atan2(
+        2.0 * (w * x + y * z),
+        1.0 - 2.0 * (x * x + y * y),
+    )
+    pitch = torch.asin(torch.clamp(2.0 * (w * y - z * x), -1.0, 1.0))
+    yaw = torch.atan2(
+        2.0 * (w * z + x * y),
+        1.0 - 2.0 * (y * y + z * z),
+    )
+    return torch.stack((yaw, pitch, roll), dim=-1)
+
+
 def obstacle_height_map(
     env: ManagerBasedRlEnv,
     sensor_name: str,

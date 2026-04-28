@@ -38,8 +38,8 @@ class CubeObstacleOffsetCfg:
 
 
 DEFAULT_CUBE_OFFSET = CubeObstacleOffsetCfg(
-    offset=(0.8, 0.0, 0.1),
-    size=(0.12, 0.6, 0.1),
+    offset=(0.8, 0.0, 0.2),
+    size=(0.12, 0.6, 0.2),
     rgba=(0.75, 0.45, 0.20, 1.0),
 )
 
