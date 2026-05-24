@@ -74,6 +74,11 @@ class MjlabOnPolicyRunner(OnPolicyRunner):
         common_step_counter and to respect the ``upload_model`` config flag.
         """
         env_state = {"common_step_counter": self.env.unwrapped.common_step_counter}
+        if hasattr(self.env.unwrapped, "_jump_obstacle_height"):
+            env_state["jump_obstacle_height"] = self.env.unwrapped._jump_obstacle_height
+            env_state["jump_curriculum_success_rate"] = getattr(
+                self.env.unwrapped, "_jump_curriculum_success_rate", 0.0
+            )
         infos = {**(infos or {}), "env_state": env_state}
         # Inline base OnPolicyRunner.save() to conditionally gate W&B upload.
         saved_dict = self.alg.save()
@@ -143,6 +148,13 @@ class MjlabOnPolicyRunner(OnPolicyRunner):
             self.env.unwrapped.common_step_counter = infos["env_state"][
                 "common_step_counter"
             ]
+            if "jump_obstacle_height" in infos["env_state"]:
+                self.env.unwrapped._jump_obstacle_height = infos["env_state"][
+                    "jump_obstacle_height"
+                ]
+                self.env.unwrapped._jump_curriculum_success_rate = infos[
+                    "env_state"
+                ].get("jump_curriculum_success_rate", 0.0)
         return infos
 
     def after_iteration(self, it: int) -> None:
@@ -185,6 +197,7 @@ class MjlabOnPolicyRunner(OnPolicyRunner):
 
         self.alg.eval_mode()
         policy = self.get_inference_policy(device=self.device)
+        self._sync_eval_env_curriculum_state()
         obs, _ = self.eval_env.reset()
         obs = obs.to(self.device)
 
@@ -225,6 +238,18 @@ class MjlabOnPolicyRunner(OnPolicyRunner):
             video = np.expand_dims(video, axis=0).transpose(0, 1, 4, 2, 3)
             metrics["Eval/video"] = torch.from_numpy(video)
         return metrics
+
+    def _sync_eval_env_curriculum_state(self) -> None:
+        """Mirror runtime curriculum state that lives outside the env config."""
+        if self.eval_env is None:
+            return
+        train_env = self.env.unwrapped
+        eval_env = self.eval_env.unwrapped
+        if hasattr(train_env, "_jump_obstacle_height"):
+            eval_env._jump_obstacle_height = train_env._jump_obstacle_height
+            eval_env._jump_curriculum_success_rate = getattr(
+                train_env, "_jump_curriculum_success_rate", 0.0
+            )
 
 
 class ProjectOnPolicyRunner(MjlabOnPolicyRunner):

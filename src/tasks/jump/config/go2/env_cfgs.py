@@ -4,8 +4,8 @@ from mjlab.envs import ManagerBasedRlEnvCfg
 
 from src.assets.robots import get_go2_robot_cfg
 from src.tasks.jump.jump_env_cfg import (
-  CubeObstacleOffsetCfg,
   DEFAULT_CUBE_OFFSET,
+  CubeObstacleOffsetCfg,
   make_jump_env_cfg,
 )
 
@@ -17,7 +17,7 @@ def unitree_go2_jump_env_cfg(
   line_spacing: float = 1.5,
   shared_layout: bool = True,
 ) -> ManagerBasedRlEnvCfg:
-  """Create Unitree Go2 jump configuration with one cube per environment."""
+  """Create Unitree Go2 jump configuration with a cube obstacle."""
   return make_jump_env_cfg(
     robot_cfg=get_go2_robot_cfg(),
     foot_names=("FR", "FL", "RR", "RL"),

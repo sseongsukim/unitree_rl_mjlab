@@ -2,7 +2,7 @@
 
 Example:
   python scripts/view_jump_env.py --viewer native --agent zero
-  python scripts/view_jump_env.py --num-envs 4 --cube0-dx 0.8 --cube0-sx 0.15
+  python scripts/view_jump_env.py --num-envs 4 --cube-x 0.8 --cube-z 0.1
 """
 
 from dataclasses import dataclass
@@ -16,9 +16,10 @@ from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.utils.torch import configure_torch_backends
 from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
 
-from src.tasks.jump.config.go2.env_cfgs import (
+from src.tasks.jump.config.go2.env_cfgs import unitree_go2_jump_env_cfg
+from src.tasks.jump.jump_env_cfg import (
+    DEFAULT_CUBE_OFFSET,
     CubeObstacleOffsetCfg,
-    unitree_go2_jump_env_cfg,
 )
 
 
@@ -32,12 +33,12 @@ class ViewJumpConfig:
     line_spacing: float = 1.5
     robot_x: float = 0.0
     robot_y: float = 0.0
-    cube0_dx: float = 0.8
-    cube0_dy: float = 0.0
-    cube0_z: float = 0.1
-    cube0_sx: float = 0.12
-    cube0_sy: float = 0.6
-    cube0_sz: float = 0.1
+    cube_x: float = DEFAULT_CUBE_OFFSET.offset[0]
+    cube_y: float = DEFAULT_CUBE_OFFSET.offset[1]
+    cube_z: float = DEFAULT_CUBE_OFFSET.offset[2]
+    cube_depth: float = DEFAULT_CUBE_OFFSET.size[0]
+    cube_width: float = DEFAULT_CUBE_OFFSET.size[1]
+    cube_height_half: float = DEFAULT_CUBE_OFFSET.size[2]
 
 
 def _make_policy(agent: Literal["zero", "random"], env: RslRlVecEnvWrapper):
@@ -65,9 +66,9 @@ def main(cfg: ViewJumpConfig):
 
     device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
     cube_offset = CubeObstacleOffsetCfg(
-        offset=(cfg.cube0_dx, cfg.cube0_dy, cfg.cube0_z),
-        size=(cfg.cube0_sx, cfg.cube0_sy, cfg.cube0_sz),
-        rgba=(0.75, 0.45, 0.20, 1.0),
+        offset=(cfg.cube_x, cfg.cube_y, cfg.cube_z),
+        size=(cfg.cube_depth, cfg.cube_width, cfg.cube_height_half),
+        rgba=DEFAULT_CUBE_OFFSET.rgba,
     )
 
     env_cfg = unitree_go2_jump_env_cfg(

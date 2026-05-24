@@ -146,3 +146,8 @@ def privileged_obstacle_state(
         dim=-1,
     )
     return torch.clamp(distances, min=-clamp_distance, max=clamp_distance)
+
+
+def zero_obstacle_state(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Return a critic-only placeholder matching jump obstacle_state shape."""
+    return torch.zeros(env.num_envs, 4, device=env.device)

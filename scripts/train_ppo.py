@@ -13,15 +13,15 @@ import tyro
 
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
 from mjlab.managers.observation_manager import ObservationTermCfg
+from mjlab.sensor import GridPatternCfg, ObjRef, RayCastSensorCfg
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
 from mjlab.utils.gpu import select_gpus
 from mjlab.utils.os import dump_yaml, get_checkpoint_path
 from mjlab.utils.torch import configure_torch_backends
-from mjlab.utils.wrappers import VideoRecorder
-
 from local_tasks import register_local_tasks
 
+from checkpoint_compat import load_runner_checkpoint_compat
 from src.rl_core.rsl_rl.rl.vecenv_wrapper import RslRlVecEnvWrapper
 from src.rl_core.rsl_rl.rl.config import (
     RslRlBaseRunnerCfg,
@@ -40,7 +40,10 @@ class TrainConfig:
     agent: RslRlBaseRunnerCfg
     use_rnd: bool = False
     use_height_map: bool = True
+    use_jump_obs_for_flat: bool = False
+    use_obstacle_height_curriculum: bool = True
     symmetric_obs: bool = False
+    pretrained_checkpoint_file: str | None = None
     motion_file: str | None = None
     video: bool = False
     video_length: int = 200
@@ -104,6 +107,52 @@ def _apply_no_height_map_observations(env_cfg: ManagerBasedRlEnvCfg) -> None:
         )
 
 
+def _apply_jump_compatible_flat_observations(env_cfg: ManagerBasedRlEnvCfg) -> None:
+    """Add jump-shaped height-map observations to the flat velocity task."""
+    if "cube" in env_cfg.scene.entities:
+        return
+    height_map_grid = (2.0, 1.0)
+    height_map_resolution = 0.1
+    if not any(sensor.name == "terrain_scan" for sensor in (env_cfg.scene.sensors or ())):
+        env_cfg.scene.sensors = (env_cfg.scene.sensors or ()) + (
+            RayCastSensorCfg(
+                name="terrain_scan",
+                frame=ObjRef(type="body", name="base_link", entity="robot"),
+                ray_alignment="yaw",
+                pattern=GridPatternCfg(
+                    size=height_map_grid,
+                    resolution=height_map_resolution,
+                ),
+                max_distance=3.0,
+                exclude_parent_body=True,
+                debug_vis=False,
+            ),
+        )
+
+    height_map_params = {
+        "sensor_name": "terrain_scan",
+        "grid_size": height_map_grid,
+        "resolution": height_map_resolution,
+        "x_range": (0.2, 1.0),
+        "y_range": (-0.5, 0.5),
+        "clamp_max": 0.24,
+    }
+    for group_name in ("actor", "critic"):
+        obs_group = env_cfg.observations[group_name]
+        obs_group.terms.pop("height_scan", None)
+        obs_group.terms["height_map"] = ObservationTermCfg(
+            func=jump_mdp.obstacle_height_map,
+            params=dict(height_map_params),
+            noise=None,
+            scale=1.0,
+        )
+    env_cfg.observations["critic"].terms["obstacle_state"] = ObservationTermCfg(
+        func=jump_mdp.zero_obstacle_state,
+        noise=None,
+        scale=1.0,
+    )
+
+
 def _apply_symmetric_observations(env_cfg: ManagerBasedRlEnvCfg) -> None:
     """Make actor observations use the critic observation layout."""
     critic_obs = env_cfg.observations.get("critic")
@@ -112,6 +161,28 @@ def _apply_symmetric_observations(env_cfg: ManagerBasedRlEnvCfg) -> None:
             "Cannot enable symmetric observations: critic observation group is missing."
         )
     env_cfg.observations["actor"] = copy.deepcopy(critic_obs)
+
+
+def _apply_obstacle_height_curriculum_cfg(
+    env_cfg: ManagerBasedRlEnvCfg,
+    enabled: bool,
+) -> bool:
+    """Enable or disable the jump obstacle height curriculum if present."""
+    has_curriculum = "obstacle_height" in env_cfg.curriculum
+    if not has_curriculum:
+        return False
+    if not enabled:
+        env_cfg.curriculum.pop("obstacle_height", None)
+    return True
+
+
+def _latest_model_checkpoint(path: Path) -> Path:
+    if path.is_file():
+        return path
+    checkpoints = sorted(path.rglob("model_*.pt"))
+    if not checkpoints:
+        raise FileNotFoundError(f"No model_*.pt checkpoint found under: {path}")
+    return checkpoints[-1]
 
 
 def _metra_wrapper_kwargs(agent_cfg: RslRlBaseRunnerCfg) -> dict:
@@ -182,6 +253,21 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
             print(
                 "[INFO] Height-map observations disabled; base pose observations enabled for actor and critic."
             )
+    elif cfg.use_jump_obs_for_flat:
+        _apply_jump_compatible_flat_observations(cfg.env)
+        if rank == 0:
+            print("[INFO] Flat task uses jump-compatible height-map observations.")
+
+    obstacle_curriculum_present = _apply_obstacle_height_curriculum_cfg(
+        cfg.env, cfg.use_obstacle_height_curriculum
+    )
+    if obstacle_curriculum_present and rank == 0:
+        if cfg.use_obstacle_height_curriculum:
+            print(
+                "[INFO] Obstacle height curriculum enabled: success-gated 8cm -> 24cm."
+            )
+        else:
+            print("[INFO] Obstacle height curriculum disabled: using fixed 24cm obstacle.")
 
     if cfg.symmetric_obs:
         _apply_symmetric_observations(cfg.env)
@@ -191,9 +277,7 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
     if rank == 0:
         print(f"[INFO] Logging experiment in directory: {log_dir}")
 
-    env = ManagerBasedRlEnv(
-        cfg=cfg.env, device=device, render_mode="rgb_array" if cfg.video else None
-    )
+    env = ManagerBasedRlEnv(cfg=cfg.env, device=device, render_mode=None)
 
     eval_env = None
     if rank == 0:
@@ -213,17 +297,14 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
         resume_path = get_checkpoint_path(
             log_root_path, cfg.agent.load_run, cfg.agent.load_checkpoint
         )
-
-    # Only record videos on rank 0 to avoid multiple workers writing to the same files.
-    if cfg.video and rank == 0:
-        env = VideoRecorder(
-            env,
-            video_folder=Path(log_dir) / "videos" / "train",
-            step_trigger=lambda step: step % cfg.video_interval == 0,
-            video_length=cfg.video_length,
-            disable_logger=True,
+    pretrained_path: Path | None = None
+    if resume_path is None and cfg.pretrained_checkpoint_file is not None:
+        pretrained_path = _latest_model_checkpoint(
+            Path(cfg.pretrained_checkpoint_file).expanduser()
         )
-        print("[INFO] Recording videos during training.")
+
+    if cfg.video and rank == 0:
+        print("[INFO] Recording evaluation videos during training.")
 
     wrapper_kwargs = _metra_wrapper_kwargs(cfg.agent)
     env = RslRlVecEnvWrapper(
@@ -255,6 +336,22 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
     if resume_path is not None:
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
         runner.load(str(resume_path))
+    elif pretrained_path is not None:
+        print(f"[INFO]: Initializing actor policy from: {pretrained_path}")
+        load_runner_checkpoint_compat(
+            runner,
+            str(pretrained_path),
+            load_cfg={
+                "actor": True,
+                "critic": False,
+                "optimizer": False,
+                "rnd": False,
+                "iteration": False,
+            },
+            strict=True,
+            map_location=device,
+            set_iteration=False,
+        )
 
     # Only write config files from rank 0 to avoid race conditions.
     if rank == 0:

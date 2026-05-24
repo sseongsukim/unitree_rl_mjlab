@@ -6,7 +6,7 @@ from absl import app, flags
 FLAGS = flags.FLAGS
 
 flags.DEFINE_integer("num_envs", 4096, "Number of environments.")
-flags.DEFINE_integer("seed", 125, "Seed number.")
+flags.DEFINE_integer("seed", 5, "Seed number.")
 flags.DEFINE_integer(
     "max_iterations", None, "Override the number of learning iterations."
 )
@@ -14,24 +14,34 @@ flags.DEFINE_integer(
     "num_steps_per_env", None, "Override rollout steps per environment."
 )
 flags.DEFINE_string("agent_name", "ppo", "Agent name.")
-flags.DEFINE_string("env_name", "jump_metra", "Task environment name.")
+flags.DEFINE_string("env_name", "jump", "Task environment name.")
 flags.DEFINE_string("logger", None, "Override logger: wandb or tensorboard.")
-flags.DEFINE_boolean("use_rnd", False, "Enable PPO RND exploration.")
+flags.DEFINE_boolean("use_rnd", True, "Enable PPO RND exploration.")
 flags.DEFINE_boolean(
     "use_height_map", True, "Enable jump height-map observations for PPO."
 )
 flags.DEFINE_boolean(
-    "symmetric_obs",
+    "use_jump_obs_for_flat",
     True,
+    "Use jump-compatible height-map observations when training the flat task.",
+)
+flags.DEFINE_boolean(
+    "use_obstacle_height_curriculum",
+    True,
+    "Enable jump obstacle height curriculum from 8cm to 24cm.",
+)
+flags.DEFINE_boolean(
+    "symmetric_obs",
+    False,
     "Use critic observations for the actor, making actor and critic observation layouts identical.",
 )
-flags.DEFINE_boolean("video", True, "Record videos during PPO training and evaluation.")
+flags.DEFINE_boolean("video", True, "Record PPO evaluation videos.")
 flags.DEFINE_integer("video_length", None, "Override PPO video recording length.")
 flags.DEFINE_integer("video_interval", None, "Override PPO video recording interval.")
-flags.DEFINE_float("metra_reward_coef", 2.0, "Override METRA reward coefficient.")
+flags.DEFINE_float("metra_reward_coef", None, "Override METRA reward coefficient.")
 flags.DEFINE_float(
     "metra_reward_final_coef",
-    0.2,
+    None,
     "Enable linear METRA reward coefficient decay to this final value.",
 )
 flags.DEFINE_integer(
@@ -40,6 +50,11 @@ flags.DEFINE_integer(
     "Override final step for linear METRA reward coefficient decay.",
 )
 flags.DEFINE_boolean("upload_model", None, "Upload model checkpoints to W&B.")
+flags.DEFINE_string(
+    "pretrained_checkpoint_file",
+    None,
+    "Local model_*.pt file or run directory used to initialize PPO actor policy.",
+)
 
 
 register_env_dict = {
@@ -99,7 +114,10 @@ def main(_):
             args,
             use_rnd=FLAGS.use_rnd,
             use_height_map=FLAGS.use_height_map,
+            use_jump_obs_for_flat=FLAGS.use_jump_obs_for_flat,
+            use_obstacle_height_curriculum=FLAGS.use_obstacle_height_curriculum,
             symmetric_obs=FLAGS.symmetric_obs,
+            pretrained_checkpoint_file=FLAGS.pretrained_checkpoint_file,
             video=FLAGS.video,
         )
         if FLAGS.video_length is not None:

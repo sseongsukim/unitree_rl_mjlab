@@ -1257,6 +1257,365 @@ def crossing_body_height_reward(
     return height_reward * active.float() * heading_gate * heading_scale
 
 
+def _stair_surface_height_at_x(
+    x: torch.Tensor,
+    start_x: float,
+    total_depth: float,
+    step_height: float,
+    num_steps: int,
+    landing_length: float,
+) -> torch.Tensor:
+    num_steps = max(1, int(num_steps))
+    step_depth = total_depth / num_steps
+    end_x = start_x + total_depth
+    landing_end_x = end_x + landing_length
+
+    step_index = torch.floor((x - start_x) / max(step_depth, 1.0e-6)).to(torch.long) + 1
+    step_index = torch.clamp(step_index, min=1, max=num_steps)
+    stair_height = step_index.to(dtype=x.dtype) * step_height
+
+    on_steps = (x >= start_x) & (x <= end_x)
+    on_landing = (x > end_x) & (x <= landing_end_x)
+    final_height = torch.full_like(x, step_height * num_steps)
+    return torch.where(on_steps, stair_height, torch.where(on_landing, final_height, 0.0))
+
+
+def feet_on_stair_surface(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    start_x: float,
+    total_depth: float,
+    step_height: float,
+    num_steps: int,
+    landing_length: float = 1.2,
+    target_y: float = 0.0,
+    width_y: float = 1.5,
+    height_tolerance: float = 0.06,
+    foot_indices: tuple[int, ...] | None = None,
+    min_forward_alignment: float = 0.55,
+    alignment_power: float = 2.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ALL_FEET_CFG,
+) -> torch.Tensor:
+    """Reward foot contacts on the stair surface matching each foot's x-position."""
+    asset: Entity = env.scene[asset_cfg.name]
+    sensor: ContactSensor = env.scene[sensor_name]
+    assert sensor.data.found is not None
+
+    foot_pos = asset.data.site_pos_w[:, asset_cfg.site_ids, :]
+    foot_contacts = sensor.data.found > 0
+    if foot_indices is not None:
+        foot_pos = foot_pos[:, foot_indices, :]
+        foot_contacts = foot_contacts[:, foot_indices]
+
+    foot_x = foot_pos[..., 0]
+    foot_y = foot_pos[..., 1]
+    foot_z = foot_pos[..., 2]
+    expected_z = _stair_surface_height_at_x(
+        foot_x,
+        start_x,
+        total_depth,
+        step_height,
+        num_steps,
+        landing_length,
+    )
+    active_x = (foot_x >= start_x - 0.05) & (foot_x <= start_x + total_depth + landing_length)
+    active_y = torch.abs(foot_y - target_y) <= 0.5 * width_y
+    height_match = torch.abs(foot_z - expected_z) <= height_tolerance
+    valid_contact = foot_contacts & active_x & active_y & height_match
+
+    forward_alignment = torch.clamp(torch.cos(asset.data.heading_w), min=0.0, max=1.0)
+    heading_gate = (forward_alignment >= min_forward_alignment).float()
+    heading_scale = torch.pow(forward_alignment, alignment_power)
+    return valid_contact.float().mean(dim=1) * heading_gate * heading_scale
+
+
+def stair_body_height_tracking(
+    env: ManagerBasedRlEnv,
+    start_x: float,
+    total_depth: float,
+    step_height: float,
+    num_steps: int,
+    landing_length: float = 1.2,
+    base_clearance: float = 0.34,
+    std: float = 0.16,
+    min_forward_alignment: float = 0.5,
+    alignment_power: float = 1.5,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward the base staying at a plausible height over the current stair."""
+    asset: Entity = env.scene[asset_cfg.name]
+    root_x = asset.data.root_link_pos_w[:, 0]
+    root_z = asset.data.root_link_pos_w[:, 2]
+    terrain_z = _stair_surface_height_at_x(
+        root_x,
+        start_x,
+        total_depth,
+        step_height,
+        num_steps,
+        landing_length,
+    )
+    target_z = terrain_z + base_clearance
+    active = (root_x >= start_x - 0.35) & (root_x <= start_x + total_depth + landing_length)
+    height_reward = torch.exp(-torch.square(root_z - target_z) / max(std**2, 1.0e-6))
+    forward_alignment = torch.clamp(torch.cos(asset.data.heading_w), min=0.0, max=1.0)
+    heading_gate = (forward_alignment >= min_forward_alignment).float()
+    heading_scale = torch.pow(forward_alignment, alignment_power)
+    return height_reward * active.float() * heading_gate * heading_scale
+
+
+def stair_foot_lift_to_next_surface(
+    env: ManagerBasedRlEnv,
+    start_x: float,
+    total_depth: float,
+    step_height: float,
+    num_steps: int,
+    landing_length: float = 1.2,
+    lookahead_x: float = 0.18,
+    clearance: float = 0.08,
+    std: float = 0.10,
+    ground_sensor_name: str | None = None,
+    stair_sensor_name: str | None = None,
+    foot_indices: tuple[int, ...] | None = None,
+    min_forward_speed: float = 0.05,
+    target_speed: float = 0.5,
+    min_forward_alignment: float = 0.45,
+    alignment_power: float = 1.5,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ALL_FEET_CFG,
+) -> torch.Tensor:
+    """Reward lifting swing feet toward the next stair surface before contact."""
+    asset: Entity = env.scene[asset_cfg.name]
+    foot_pos = asset.data.site_pos_w[:, asset_cfg.site_ids, :]
+    if foot_indices is not None:
+        foot_pos = foot_pos[:, foot_indices, :]
+
+    foot_x = foot_pos[..., 0]
+    foot_z = foot_pos[..., 2]
+    current_surface = _stair_surface_height_at_x(
+        foot_x,
+        start_x,
+        total_depth,
+        step_height,
+        num_steps,
+        landing_length,
+    )
+    next_surface = _stair_surface_height_at_x(
+        foot_x + lookahead_x,
+        start_x,
+        total_depth,
+        step_height,
+        num_steps,
+        landing_length,
+    )
+    needs_lift = next_surface > current_surface + 0.5 * step_height
+    in_window = (foot_x >= start_x - 0.35) & (
+        foot_x <= start_x + total_depth + 0.15
+    )
+
+    swing_mask = torch.ones_like(foot_x, dtype=torch.bool)
+    if ground_sensor_name is not None:
+        ground_sensor: ContactSensor = env.scene[ground_sensor_name]
+        assert ground_sensor.data.found is not None
+        ground_contact = ground_sensor.data.found > 0
+        if foot_indices is not None:
+            ground_contact = ground_contact[:, foot_indices]
+        swing_mask = swing_mask & (~ground_contact)
+    if stair_sensor_name is not None:
+        stair_sensor: ContactSensor = env.scene[stair_sensor_name]
+        assert stair_sensor.data.found is not None
+        stair_contact = stair_sensor.data.found > 0
+        if foot_indices is not None:
+            stair_contact = stair_contact[:, foot_indices]
+        swing_mask = swing_mask & (~stair_contact)
+
+    target_z = next_surface + clearance
+    height_reward = torch.exp(-torch.square(foot_z - target_z) / max(std**2, 1.0e-6))
+    active = needs_lift & in_window & swing_mask
+    forward_speed = torch.clamp(
+        (asset.data.root_link_lin_vel_w[:, 0] - min_forward_speed)
+        / max(target_speed - min_forward_speed, 1.0e-6),
+        min=0.0,
+        max=1.0,
+    )
+    forward_alignment = torch.clamp(torch.cos(asset.data.heading_w), min=0.0, max=1.0)
+    heading_gate = (forward_alignment >= min_forward_alignment).float()
+    heading_scale = torch.pow(forward_alignment, alignment_power)
+    return (
+        (height_reward * active.float()).mean(dim=1)
+        * forward_speed
+        * heading_gate
+        * heading_scale
+    )
+
+
+def stair_front_feet_hang_penalty(
+    env: ManagerBasedRlEnv,
+    start_x: float,
+    total_depth: float,
+    step_height: float,
+    num_steps: int,
+    landing_length: float = 1.2,
+    ground_sensor_name: str | None = None,
+    stair_sensor_name: str | None = None,
+    foot_indices: tuple[int, ...] | None = None,
+    min_lift_height: float = 0.10,
+    speed_threshold: float = 0.12,
+    min_air_time: float = 0.18,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ALL_FEET_CFG,
+) -> torch.Tensor:
+    """Penalize lifting front feet and hanging without forward commitment."""
+    asset: Entity = env.scene[asset_cfg.name]
+    foot_pos = asset.data.site_pos_w[:, asset_cfg.site_ids, :]
+    if foot_indices is not None:
+        foot_pos = foot_pos[:, foot_indices, :]
+
+    foot_x = foot_pos[..., 0]
+    foot_z = foot_pos[..., 2]
+    surface_z = _stair_surface_height_at_x(
+        foot_x,
+        start_x,
+        total_depth,
+        step_height,
+        num_steps,
+        landing_length,
+    )
+    near_first_step = (foot_x >= start_x - 0.45) & (foot_x <= start_x + 0.55)
+    lifted = foot_z > surface_z + min_lift_height
+
+    no_contact = torch.ones_like(foot_x, dtype=torch.bool)
+    long_air = torch.ones_like(foot_x, dtype=torch.bool)
+    if ground_sensor_name is not None:
+        ground_sensor: ContactSensor = env.scene[ground_sensor_name]
+        assert ground_sensor.data.found is not None
+        ground_contact = ground_sensor.data.found > 0
+        if foot_indices is not None:
+            ground_contact = ground_contact[:, foot_indices]
+        no_contact = no_contact & (~ground_contact)
+        if ground_sensor.data.current_air_time is not None:
+            air_time = ground_sensor.data.current_air_time
+            if foot_indices is not None:
+                air_time = air_time[:, foot_indices]
+            long_air = long_air & (air_time >= min_air_time)
+    if stair_sensor_name is not None:
+        stair_sensor: ContactSensor = env.scene[stair_sensor_name]
+        assert stair_sensor.data.found is not None
+        stair_contact = stair_sensor.data.found > 0
+        if foot_indices is not None:
+            stair_contact = stair_contact[:, foot_indices]
+        no_contact = no_contact & (~stair_contact)
+
+    low_speed = asset.data.root_link_lin_vel_w[:, 0] < speed_threshold
+    root_x = asset.data.root_link_pos_w[:, 0]
+    before_or_at_first_step = (root_x >= start_x - 0.45) & (root_x <= start_x + 0.35)
+    hanging_feet = lifted & no_contact & long_air & near_first_step
+    return (
+        hanging_feet.float().mean(dim=1)
+        * low_speed.float()
+        * before_or_at_first_step.float()
+    )
+
+
+class stair_body_climb_progress:
+    """Reward increases in base height as the robot climbs the stair sequence."""
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        del cfg
+        self.prev_climb = torch.zeros(env.num_envs, device=env.device)
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        start_x: float,
+        total_depth: float,
+        step_height: float,
+        num_steps: int,
+        landing_length: float = 1.2,
+        base_clearance: float = 0.34,
+        min_forward_alignment: float = 0.45,
+        alignment_power: float = 1.5,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        asset: Entity = env.scene[asset_cfg.name]
+        just_reset = env.episode_length_buf <= 1
+        self.prev_climb[just_reset] = 0.0
+
+        root_x = asset.data.root_link_pos_w[:, 0]
+        root_z = asset.data.root_link_pos_w[:, 2]
+        terrain_z = _stair_surface_height_at_x(
+            root_x,
+            start_x,
+            total_depth,
+            step_height,
+            num_steps,
+            landing_length,
+        )
+        climb = torch.clamp(root_z - base_clearance, min=0.0)
+        target_climb = torch.clamp(terrain_z, min=0.0, max=step_height * num_steps)
+        climb = torch.minimum(climb, target_climb)
+        active = (root_x >= start_x - 0.25) & (
+            root_x <= start_x + total_depth + landing_length
+        )
+        improvement = torch.clamp(climb - self.prev_climb, min=0.0)
+        self.prev_climb[:] = torch.maximum(self.prev_climb, climb)
+
+        forward_alignment = torch.clamp(torch.cos(asset.data.heading_w), min=0.0, max=1.0)
+        heading_gate = (forward_alignment >= min_forward_alignment).float()
+        heading_scale = torch.pow(forward_alignment, alignment_power)
+        env.extras["log"]["Metrics/stair_body_climb_mean"] = climb.mean()
+        return improvement * active.float() * heading_gate * heading_scale
+
+
+class stair_step_milestone_bonus:
+    """One-time bonus as the robot reaches each stair depth milestone."""
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        del cfg
+        self.best_step = torch.zeros(env.num_envs, device=env.device, dtype=torch.long)
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        start_x: float,
+        total_depth: float,
+        num_steps: int,
+        landing_length: float = 1.2,
+        min_forward_alignment: float = 0.55,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        asset: Entity = env.scene[asset_cfg.name]
+        just_reset = env.episode_length_buf <= 1
+        self.best_step[just_reset] = 0
+
+        num_steps = max(1, int(num_steps))
+        goal_depth = total_depth + landing_length
+        progress = torch.clamp(
+            (asset.data.root_link_pos_w[:, 0] - start_x) / max(goal_depth, 1.0e-6),
+            min=0.0,
+            max=1.0,
+        )
+        current_step = torch.floor(progress * (num_steps + 1)).to(torch.long)
+        current_step = torch.clamp(current_step, min=0, max=num_steps + 1)
+        improvement = torch.clamp(current_step - self.best_step, min=0)
+        self.best_step = torch.maximum(self.best_step, current_step)
+
+        forward_alignment = torch.clamp(torch.cos(asset.data.heading_w), min=0.0, max=1.0)
+        heading_gate = (forward_alignment >= min_forward_alignment).float()
+        env.extras["log"]["Metrics/stair_milestone_mean"] = current_step.float().mean()
+        env.extras["log"]["Metrics/stair_best_milestone_mean"] = (
+            self.best_step.float().mean()
+        )
+        env.extras["log"]["Metrics/stair_best_milestone_max"] = (
+            self.best_step.float().max()
+        )
+        for step_idx in range(1, num_steps + 1):
+            env.extras["log"][f"Metrics/stair_reached_step_{step_idx}_ratio"] = (
+                (self.best_step >= step_idx).float().mean()
+            )
+        env.extras["log"]["Metrics/stair_reached_landing_ratio"] = (
+            (self.best_step >= num_steps + 1).float().mean()
+        )
+        return improvement.to(dtype=forward_alignment.dtype) * heading_gate * forward_alignment
+
+
 def post_mount_forward_reward(
     env: ManagerBasedRlEnv,
     start_x: float,

@@ -5,7 +5,7 @@ base factory that robot-specific jump tasks can customize.
 """
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import mujoco
 import torch
@@ -15,6 +15,7 @@ from mjlab.envs import ManagerBasedRlEnv
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers import SceneEntityCfg, TerminationTermCfg
+from mjlab.managers.curriculum_manager import CurriculumTermCfg
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.sensor import (
@@ -38,8 +39,8 @@ class CubeObstacleOffsetCfg:
 
 
 DEFAULT_CUBE_OFFSET = CubeObstacleOffsetCfg(
-    offset=(0.8, 0.0, 0.2),
-    size=(0.12, 0.6, 0.2),
+    offset=(1.25, 0.0, 0.12),
+    size=(0.275, 0.6, 0.12),
     rgba=(0.75, 0.45, 0.20, 1.0),
 )
 
@@ -105,7 +106,10 @@ def reset_cube_line(
             _line_y_positions(env_ids, env.num_envs, spacing, robot_spawn_xy[1])
             + cube_offset.offset[1]
         )
-    positions[:, 2] = cube_offset.offset[2]
+    top_height = getattr(env, "_jump_obstacle_height", None)
+    if top_height is None:
+        top_height = cube_offset.offset[2] + cube_offset.size[2]
+    positions[:, 2] = float(top_height) - cube_offset.size[2]
     orientations = root_states[:, 3:7]
 
     asset.write_mocap_pose_to_sim(
@@ -303,6 +307,17 @@ def add_jump_rewards(
             "asset_cfg": SceneEntityCfg("robot"),
         },
     )
+    cfg.rewards["obstacle_twist"] = RewardTermCfg(
+        func=jump_mdp.pre_obstacle_twist_penalty,
+        weight=-6.0,
+        params={
+            "start_x": obstacle_start_x + 0.02,
+            "end_x": obstacle_end_x + 0.24,
+            "heading_weight": 2.0,
+            "yaw_rate_weight": 1.5,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
     cfg.rewards["rear_air_before_takeoff"] = RewardTermCfg(
         func=jump_mdp.rear_air_penalty_before_takeoff,
         weight=-6.0,
@@ -431,7 +446,7 @@ def add_jump_rewards(
     )
     cfg.rewards["obstacle_approach_speed"] = RewardTermCfg(
         func=jump_mdp.obstacle_approach_speed,
-        weight=6.0,
+        weight=10.0,
         params={
             "goal_x": obstacle_goal_x,
             "target_speed": 1.3,
@@ -581,12 +596,30 @@ def make_jump_env_cfg(
     line_spacing: float = 1.5,
     shared_layout: bool = True,
     base_body_name: str = "base_link",
+    enable_obstacle_height_curriculum: bool = True,
+    min_obstacle_height: float = 0.08,
+    max_obstacle_height: float = 0.24,
+    obstacle_height_success_threshold: float = 0.50,
+    obstacle_height_failure_threshold: float = 0.20,
+    obstacle_height_step: float = 0.02,
+    obstacle_height_decrease_step: float = 0.01,
+    obstacle_height_update_interval_episodes: int = 512,
 ) -> ManagerBasedRlEnvCfg:
     """Create a base jump environment config for a legged robot."""
     cfg = make_velocity_env_cfg()
     height_map_grid = (2.0, 1.0)
     height_map_resolution = 0.1
-    obstacle_height = 2.0 * cube_offset.size[2]
+    if enable_obstacle_height_curriculum:
+        max_obstacle_height = max(max_obstacle_height, min_obstacle_height)
+        cube_half_height = max(cube_offset.size[2], 0.5 * max_obstacle_height)
+        cube_offset = replace(
+            cube_offset,
+            size=(cube_offset.size[0], cube_offset.size[1], cube_half_height),
+            offset=(cube_offset.offset[0], cube_offset.offset[1], cube_half_height),
+        )
+        obstacle_height = max_obstacle_height
+    else:
+        obstacle_height = cube_offset.offset[2] + cube_offset.size[2]
     site_names = site_names or foot_names
     front_body_names = front_body_names or ()
     rear_body_names = rear_body_names or ()
@@ -790,6 +823,21 @@ def make_jump_env_cfg(
         robot_spawn_xy=robot_spawn_xy,
         nonfoot_ground_sensor_name=nonfoot_ground_cfg.name,
     )
+
+    if enable_obstacle_height_curriculum:
+        cfg.curriculum["obstacle_height"] = CurriculumTermCfg(
+            func=jump_mdp.obstacle_height_curriculum,
+            params={
+                "min_height": min_obstacle_height,
+                "max_height": max_obstacle_height,
+                "goal_x": obstacle_goal_x,
+                "success_threshold": obstacle_height_success_threshold,
+                "failure_threshold": obstacle_height_failure_threshold,
+                "height_step": obstacle_height_step,
+                "decrease_step": obstacle_height_decrease_step,
+                "update_interval_episodes": obstacle_height_update_interval_episodes,
+            },
+        )
 
     if play:
         cfg.episode_length_s = int(1e9)
